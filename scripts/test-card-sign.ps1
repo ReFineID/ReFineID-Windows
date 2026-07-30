@@ -1,7 +1,10 @@
 [CmdletBinding()]
 param(
     [ValidateSet('All', 'Authentication', 'Qualified')]
-    [string]$Role = 'All'
+    [string]$Role = 'All',
+
+    [ValidateSet('All', 'Pkcs1', 'Pss')]
+    [string]$RsaPadding = 'All'
 )
 
 Set-StrictMode -Version Latest
@@ -59,8 +62,28 @@ foreach ($case in $certificateCases | Sort-Object @{ Expression = { $_.Role -ne 
     $rsaPrivate = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
     $rsaPublic = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
     if ($rsaPrivate -and $rsaPublic) {
-        try {
+        if ($case.Role -eq 'Qualified' -and $RsaPadding -eq 'All') {
+            $rsaPrivate.Dispose()
+            $rsaPublic.Dispose()
             foreach ($paddingName in @('Pkcs1', 'Pss')) {
+                Write-Host "Starting isolated Qualified $paddingName test for one-time PIN2 authentication."
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath `
+                    -Role Qualified -RsaPadding $paddingName
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Qualified $paddingName child test failed with exit code $LASTEXITCODE."
+                }
+            }
+            $testedKeys += 1
+            continue
+        }
+
+        $paddingCases = if ($RsaPadding -eq 'All') {
+            @('Pkcs1', 'Pss')
+        } else {
+            @($RsaPadding)
+        }
+        try {
+            foreach ($paddingName in $paddingCases) {
                 $padding = [Security.Cryptography.RSASignaturePadding]::$paddingName
                 $signature = $rsaPrivate.SignData(
                     $data,
