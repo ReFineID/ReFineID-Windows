@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory)]
     [string]$DllPath,
 
-    [switch]$AllowUnsigned
+    [switch]$AllowUnsigned,
+
+    [string]$ContactlessAtrHex
 )
 
 Set-StrictMode -Version Latest
@@ -32,6 +34,26 @@ function Get-PeMachine([string]$Path) {
     [BitConverter]::ToUInt16($bytes, $peOffset + 4)
 }
 
+function ConvertFrom-AtrHex([string]$Hex) {
+    $compact = $Hex -replace '[\s:-]', ''
+    if ([string]::IsNullOrEmpty($compact) -or
+        $compact -notmatch '\A[0-9A-Fa-f]+\z' -or
+        ($compact.Length % 2) -ne 0) {
+        throw 'ContactlessAtrHex must contain complete hexadecimal bytes.'
+    }
+
+    $byteCount = $compact.Length / 2
+    if ($byteCount -lt 2 -or $byteCount -gt 33) {
+        throw 'ContactlessAtrHex must contain between 2 and 33 bytes.'
+    }
+
+    [byte[]]$bytes = [byte[]]::new($byteCount)
+    for ($index = 0; $index -lt $byteCount; $index++) {
+        $bytes[$index] = [Convert]::ToByte($compact.Substring($index * 2, 2), 16)
+    }
+    $bytes
+}
+
 function Set-CardRegistration(
     [string]$Name,
     [byte[]]$Atr,
@@ -51,6 +73,11 @@ function Set-CardRegistration(
 }
 
 Assert-Administrator
+
+$contactlessAtr = $null
+if ($PSBoundParameters.ContainsKey('ContactlessAtrHex')) {
+    [byte[]]$contactlessAtr = ConvertFrom-AtrHex $ContactlessAtrHex
+}
 
 $source = (Resolve-Path -LiteralPath $DllPath).Path
 if ([IO.Path]::GetFileName($source) -ne 'refineid_minidriver.dll') {
@@ -103,6 +130,16 @@ try {
     Set-CardRegistration -Name 'FINEID-S4-1-v4.0' `
         -Atr ([byte[]](0x3B,0x7F,0x96,0x00,0x00,0x80,0x31,0xB8,0x65,0xB0,0x85,0x05,0x00,0x00,0x00,0x00,0x00,0x82,0x90,0x00)) `
         -AtrMask ([byte[]](0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0x00,0xFF,0xFF,0xFF))
+
+    if ($null -ne $contactlessAtr) {
+        [byte[]]$contactlessMask = [byte[]]::new($contactlessAtr.Length)
+        for ($index = 0; $index -lt $contactlessMask.Length; $index++) {
+            $contactlessMask[$index] = 0xFF
+        }
+        Set-CardRegistration -Name 'FINEID-S4-1-v4.0-contactless' `
+            -Atr $contactlessAtr `
+            -AtrMask $contactlessMask
+    }
 } catch {
     if (Test-Path -LiteralPath $backup) {
         Copy-Item -LiteralPath $backup -Destination $destination -Force
@@ -115,4 +152,7 @@ try {
 }
 
 Write-Host "Installed $destination"
+if ($null -ne $contactlessAtr) {
+    Write-Host 'Registered the exact contactless ATR for FINEID S4-1 v4.0.'
+}
 Write-Host 'Run certutil -scinfo with a FINEID card inserted.'

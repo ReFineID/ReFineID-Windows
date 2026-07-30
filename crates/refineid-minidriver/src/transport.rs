@@ -25,6 +25,8 @@
 )]
 
 use refineid_lib_core::atr::{Atr, AtrError};
+use refineid_lib_core::pace::PaceSession;
+use refineid_lib_core::secure_messaging::{SmError, SmTransport};
 use refineid_lib_core::transport::{
     CardTransport, CommandApdu, ResponseApdu, TransportErrorExt, TransportErrorKind,
     TransportOutcome,
@@ -209,6 +211,105 @@ pub(crate) struct WinScardTransport {
     pub(crate) protocol: ScardProtocol,
 }
 
+/// The Card Module transport for one acquired context.
+///
+/// Contact cards use `Plain`. A contactless card that was primed by the
+/// settings app uses `Protected` for the entire context so certificate reads,
+/// PIN verification, and signatures all share one PACE secure-messaging SSC.
+pub(crate) enum CardSessionTransport {
+    /// Direct ISO 7816 transmission for a contact card.
+    Plain(WinScardTransport),
+    /// PACE secure messaging over a contactless PC/SC handle.
+    Protected(SmTransport<WinScardTransport>),
+}
+
+impl CardSessionTransport {
+    /// Adopt a direct contact transport.
+    pub(crate) const fn plain(transport: WinScardTransport) -> Self {
+        Self::Plain(transport)
+    }
+
+    /// Adopt a transport and its freshly established PACE session.
+    pub(crate) fn protected(transport: WinScardTransport, session: PaceSession) -> Self {
+        Self::Protected(SmTransport::new(transport, session))
+    }
+
+    /// Whether every application command is currently PACE-protected.
+    pub(crate) const fn is_protected(&self) -> bool {
+        matches!(self, Self::Protected(_))
+    }
+
+    /// The raw Windows transport beneath the optional SM channel.
+    pub(crate) const fn raw(&self) -> &WinScardTransport {
+        match self {
+            Self::Plain(transport) => transport,
+            Self::Protected(transport) => transport.inner(),
+        }
+    }
+
+    /// The raw Windows transport beneath the optional SM channel.
+    ///
+    /// A protected caller may use this only to establish the replacement PACE
+    /// session immediately after Windows changed the card handle.
+    pub(crate) const fn raw_mut(&mut self) -> &mut WinScardTransport {
+        match self {
+            Self::Plain(transport) => transport,
+            Self::Protected(transport) => transport.inner_mut(),
+        }
+    }
+
+    /// Replace the PACE session after Windows reset a protected card.
+    pub(crate) fn replace_pace_session(&mut self, session: PaceSession) {
+        if let Self::Protected(transport) = self {
+            transport.replace_session(session);
+        }
+    }
+
+    /// Active PC/SC handle.
+    pub(crate) const fn h_card(&self) -> SCARDHANDLE {
+        self.raw().h_card
+    }
+
+    /// Active PC/SC protocol, for bounded diagnostics only.
+    pub(crate) const fn protocol(&self) -> ScardProtocol {
+        self.raw().protocol
+    }
+
+    /// Raw ATR bytes captured from `CARD_DATA`.
+    pub(crate) fn atr_bytes(&self) -> &[u8] {
+        &self.raw().atr
+    }
+}
+
+/// Failure from either the direct PC/SC path or its PACE SM wrapper.
+#[derive(Debug)]
+pub(crate) enum CardSessionTransportError {
+    /// Direct PC/SC failure.
+    Plain(TransportError),
+    /// Secure-messaging or underlying PC/SC failure.
+    Protected(SmError<TransportError>),
+}
+
+impl core::fmt::Display for CardSessionTransportError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Plain(error) => write!(formatter, "{error}"),
+            Self::Protected(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl core::error::Error for CardSessionTransportError {}
+
+impl TransportErrorExt for CardSessionTransportError {
+    fn kind(&self) -> TransportErrorKind {
+        match self {
+            Self::Plain(error) => error.kind(),
+            Self::Protected(error) => error.kind(),
+        }
+    }
+}
+
 /// winscard.dll transport faults, classified into the shared
 /// [`TransportErrorKind`] vocabulary via [`TransportErrorExt`].
 #[derive(Debug)]
@@ -373,5 +474,24 @@ impl CardTransport for WinScardTransport {
 
     fn atr(&self) -> Result<Atr, AtrError> {
         Atr::new(&self.atr)
+    }
+}
+
+impl CardTransport for CardSessionTransport {
+    type Error = CardSessionTransportError;
+
+    fn transmit_outcome(&mut self, apdu: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
+        match self {
+            Self::Plain(transport) => transport
+                .transmit_outcome(apdu)
+                .map_err(CardSessionTransportError::Plain),
+            Self::Protected(transport) => transport
+                .transmit_outcome(apdu)
+                .map_err(CardSessionTransportError::Protected),
+        }
+    }
+
+    fn atr(&self) -> Result<Atr, AtrError> {
+        self.raw().atr()
     }
 }

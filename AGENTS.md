@@ -1,7 +1,10 @@
 # ReFineID Windows agent rules
 
-- ASCII only in source and project prose unless a protocol fixture requires
-  exact UTF-8.
+- Source and project prose may use the ISO-8859-15 character repertoire,
+  including meaningful specification symbols such as `§`; do not degrade them
+  to ASCII. Store each source file in the encoding required by its toolchain
+  (Rust `.rs` files must be valid UTF-8). Preserve a protocol fixture's exact
+  specified byte encoding.
 - No AI attribution in commits.
 - Never log or commit PIN values, personal certificates, identity codes, or
   private traces.

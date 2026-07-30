@@ -49,6 +49,36 @@ if (-not $certificateCases) {
 }
 
 $data = [Text.Encoding]::UTF8.GetBytes('ReFineID sign test payload')
+
+function Test-BytesEqual([byte[]]$Left, [byte[]]$Right) {
+    if ($null -eq $Left -or $null -eq $Right -or $Left.Length -ne $Right.Length) {
+        return $false
+    }
+    [Convert]::ToBase64String($Left) -ceq [Convert]::ToBase64String($Right)
+}
+
+function Test-RsaPublicKeyMatch($PrivateKey, $PublicKey) {
+    try {
+        $privateParameters = $PrivateKey.ExportParameters($false)
+        $publicParameters = $PublicKey.ExportParameters($false)
+        (Test-BytesEqual $privateParameters.Modulus $publicParameters.Modulus) -and
+            (Test-BytesEqual $privateParameters.Exponent $publicParameters.Exponent)
+    } catch {
+        $false
+    }
+}
+
+function Test-EcPublicKeyMatch($PrivateKey, $PublicKey) {
+    try {
+        $privateParameters = $PrivateKey.ExportParameters($false)
+        $publicParameters = $PublicKey.ExportParameters($false)
+        (Test-BytesEqual $privateParameters.Q.X $publicParameters.Q.X) -and
+            (Test-BytesEqual $privateParameters.Q.Y $publicParameters.Q.Y)
+    } catch {
+        $false
+    }
+}
+
 $testedKeys = 0
 foreach ($case in $certificateCases | Sort-Object @{ Expression = { $_.Role -ne 'Authentication' } }) {
     $certificate = $case.Certificate
@@ -59,8 +89,23 @@ foreach ($case in $certificateCases | Sort-Object @{ Expression = { $_.Role -ne 
     }
     Write-Host "Testing $($case.Role) certificate; Windows will request $pinDescription."
 
-    $rsaPrivate = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
     $rsaPublic = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
+    $rsaPrivate = $null
+    if ($rsaPublic) {
+        try {
+            $rsaPrivate = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+        } catch {
+            $rsaPrivate = $null
+        }
+    }
+    if ($rsaPublic -and (-not $rsaPrivate -or -not (Test-RsaPublicKeyMatch $rsaPrivate $rsaPublic))) {
+        if ($rsaPrivate) {
+            $rsaPrivate.Dispose()
+        }
+        $rsaPublic.Dispose()
+        Write-Warning "Skipping a propagated $($case.Role) certificate whose RSA public key does not match the present card container."
+        continue
+    }
     if ($rsaPrivate -and $rsaPublic) {
         if ($case.Role -eq 'Qualified' -and $RsaPadding -eq 'All') {
             $rsaPrivate.Dispose()
@@ -109,8 +154,23 @@ foreach ($case in $certificateCases | Sort-Object @{ Expression = { $_.Role -ne 
         continue
     }
 
-    $ecPrivate = [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($certificate)
     $ecPublic = [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPublicKey($certificate)
+    $ecPrivate = $null
+    if ($ecPublic) {
+        try {
+            $ecPrivate = [Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($certificate)
+        } catch {
+            $ecPrivate = $null
+        }
+    }
+    if ($ecPublic -and (-not $ecPrivate -or -not (Test-EcPublicKeyMatch $ecPrivate $ecPublic))) {
+        if ($ecPrivate) {
+            $ecPrivate.Dispose()
+        }
+        $ecPublic.Dispose()
+        Write-Warning "Skipping a propagated $($case.Role) certificate whose EC public key does not match the present card container."
+        continue
+    }
     if ($ecPrivate -and $ecPublic) {
         try {
             $signature = $ecPrivate.SignData(

@@ -32,27 +32,56 @@ with FINEID S4-1 v3.1 and v4.0 cards, including:
 - ECDSA P-384 signing;
 - Windows certificate propagation and Edge client authentication.
 
-The public repository rebuilds and revalidates those paths. Hardware acceptance
-still requires a real card and reader; CI cannot replace that proof.
+This public port has revalidated the contact path locally with a real FINEID
+S4-1 v3.1 RSA card and an ACR39U reader:
+
+- `certutil -scinfo -silent` selected the ReFineID Card Module without an
+  unknown-card error;
+- the settings app restored PIN2 with the recovery code and the card reported
+  five attempts plus the changed-from-factory flag afterwards; and
+- Microsoft KSP calls completed and locally verified RSA-3072 PKCS #1 v1.5 and
+  RSA-PSS signatures with both PIN1 and PIN2.
+
+CI still cannot replace that hardware proof, and the separate NFC acceptance
+boundary is documented below.
 
 ### Contactless NFC status
 
-The browser and Windows KSP tests above currently use the contact interface.
-The FINEID S4-1 v4.0 card and an ACS ACR1581 PICC reader have separately passed
-the shared Rust core's contactless `EF.CardAccess`, PACE, and protected eMRTD
-read on Windows.
+The browser and Windows KSP acceptance tests above currently use the contact
+interface. The repository now contains an experimental end-to-end contactless
+path:
 
-The alpha minidriver does not yet expose that path to Windows applications:
+- ReFineID Settings proves the printed six-digit CAN with the Apple-reference
+  `SELECT MF`, PACE, and protected PKCS #15 sequence before saving it;
+- only the CAN is stored in the current Windows user's Credential Manager,
+  keyed by the complete PC/SC contactless ATR; no PIN or PUK is stored;
+- the minidriver retrieves that CAN before certificate discovery and opens a
+  fresh PACE secure-messaging session whenever Windows replaces the PC/SC
+  handle; and
+- the development installer can register the exact observed contactless ATR
+  with an all-bytes mask.
 
-- Windows receives a PC/SC contactless pseudo-ATR instead of the card's contact
-  ATR, so the current installer registration does not select this minidriver.
-- The card keeps PKCS #15 certificates and keys behind PACE on the contactless
-  interface. The minidriver needs a secure, card-bound CAN provisioning flow
-  before `CardAcquireContext` can read those certificates.
+The FINEID S4-1 v4.0 PACE and protected-read sequence has passed separately with
+an ACS ACR1581 PICC reader. The new Windows Credential Manager-to-minidriver
+handoff still needs real-reader acceptance before contactless browser use can be
+called supported. Contact mode remains the supported alpha path meanwhile.
 
-Registering the pseudo-ATR alone is not a fix: it would select the DLL, but the
-first certificate read would still fail before PACE. Use the contact interface
-for Edge, Chrome, Schannel, and CNG until the Windows NFC prime flow is present.
+### ReFineID Settings
+
+`apps/ReFineID.Settings` is a native WinUI 3 desktop settings application with
+a narrow C# UI and a Rust card-service DLL. It can:
+
+- inspect a card and show counter-safe PIN1, PIN2, and recovery status;
+- change PIN1 or PIN2;
+- restore either PIN with the recovery code;
+- activate a new card while binding every modifying command to the inspected
+  reader and card serial; and
+- prove and save the printed CAN for the experimental contactless path.
+
+PIN, recovery, and activation values cross the FFI as bounded byte arrays, are
+zeroized in the Rust domain types, and never enter the JSON response or event
+stream. The CAN is saved only after a live PACE proof. No PIN or recovery code
+is placed in Windows Credential Manager.
 
 ## Build
 
@@ -60,6 +89,7 @@ Requirements:
 
 - Windows 11;
 - Rust 1.97.1 through `rustup`;
+- .NET SDK 10 for ReFineID Settings;
 - Visual Studio 2022 Build Tools with the MSVC C++ workload.
 
 Build both supported architectures:
@@ -85,6 +115,16 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p refineid-lib-core
 ```
 
+Build the unpackaged x64 settings app:
+
+```powershell
+dotnet build apps/ReFineID.Settings/ReFineID.Settings.csproj `
+  -c Release `
+  -p:Platform=x64 `
+  -p:WindowsPackageType=None `
+  -p:EnableMsixTooling=false
+```
+
 ## Development install
 
 Production Windows binaries must be Authenticode-signed. Do not distribute an
@@ -99,6 +139,21 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -DllPath dist/x64/refineid_minidriver.dll `
   -AllowUnsigned
 ```
+
+For an experimental contactless install, first read the complete ATR reported
+for the ACR1581 PICC interface with `certutil -scinfo`. Register that exact
+value rather than a family-wide mask:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts/install-dev.ps1 `
+  -DllPath dist/x64/refineid_minidriver.dll `
+  -ContactlessAtrHex '<exact ATR from certutil -scinfo>' `
+  -AllowUnsigned
+```
+
+Then use ReFineID Settings once to prove and save the card's printed CAN. The
+CAN argument is deliberately not accepted by the installer or command line.
 
 Validate with a reader and card:
 

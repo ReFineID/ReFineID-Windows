@@ -50,9 +50,8 @@ pub trait CardAccessOps: CardTransport {
         Self: Sized,
     {
         self.select_mf()?;
-        let fci = self.select_ef(EF_CARD_ACCESS_FID)?;
-        let size = fci.parse_file_size();
-        let bytes = self.read_binary_to_end(size)?;
+        self.select_ef(EF_CARD_ACCESS_FID)?;
+        let bytes = self.read_binary_der_object("EF.CardAccess")?;
         CardAccess::parse(&bytes).map_err(|e| Pkcs15Error::InvalidData(e.as_static_str()))
     }
 }

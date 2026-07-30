@@ -463,8 +463,8 @@ impl SelectFileResponseMode {
 
 /// FINEID S1 v4.2 §3.2 SELECT FILE: select a DF or an EF.
 ///
-/// Generalisation of the existing [`SelectEfReturnFci`] (which
-/// covers the P1=`02h` P2=`00h` subset). The four P1 modes and
+/// Generalisation of the focused [`SelectEfNoFci`] command (which
+/// covers the P1=`02h` P2=`0Ch` subset). The four P1 modes and
 /// three P2 modes from §3.2.2 are reified as
 /// [`SelectFileTarget`] / [`SelectFileResponseMode`] enums;
 /// the wire bytes follow mechanically from the typed inputs.
@@ -615,38 +615,37 @@ impl GetResponse {
 }
 
 /// ISO 7816-4 `SELECT` by 2-byte file identifier under the
-/// current DF, returning FCI (`INS=0xA4 P1=0x02 P2=0x00`).
+/// current DF without response data (`INS=0xA4 P1=0x02 P2=0x0C`).
 ///
-/// Used by `pkcs15::select_ef` to step into a specific EF; the
-/// returned FCI contains the file size for the subsequent
-/// READ-BINARY loop. This is the specific subset covered by
-/// the more general [`SelectFile`] command above with
-/// `target = EfUnderCurrentDf(fid)` and `response_mode = Fci`.
+/// This is the proven FINEID wire shape used by the Apple port:
+/// a case-3 APDU with no trailing `Le`. Keeping the command case-3
+/// also avoids the Windows T=0 stack rejecting the old case-4
+/// FCI-request shape with `ERROR_INVALID_PARAMETER`.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct SelectEfReturnFci {
+pub struct SelectEfNoFci {
     /// 2-byte file identifier per ISO 7816-4 §5.3.1.1. Owned
     /// array carries the "exactly 2 bytes" invariant at the
     /// type level.
     pub fid: [u8; 2],
 }
 
-impl SelectEfReturnFci {
+impl SelectEfNoFci {
     /// ISO 7816-4 class byte `0x00`.
     pub const CLA: u8 = 0x00;
     /// ISO 7816-4 `SELECT` instruction.
     pub const INS: u8 = 0xA4;
     /// P1: select by file identifier under current DF (`0x02`).
     pub const P1: u8 = 0x02;
-    /// P2 = `0x00`: return FCI.
-    pub const P2: u8 = 0x00;
+    /// P2 = `0x0C`: return no file control information.
+    pub const P2: u8 = 0x0C;
 
     /// Serialise into the wire APDU
-    /// (`00 A4 02 00 02 <fid0> <fid1> 00`; 8 bytes).
+    /// (`00 A4 02 0C 02 <fid0> <fid1>`; 7 bytes).
     #[inline]
     #[must_use]
     pub fn into_apdu(self) -> CommandApdu {
-        // CLA INS P1 P2 Lc=02 FID Le=00
+        // CLA INS P1 P2 Lc=02 FID
         CommandApdu::new(vec![
             Self::CLA,
             Self::INS,
@@ -655,7 +654,6 @@ impl SelectEfReturnFci {
             0x02,
             self.fid[0],
             self.fid[1],
-            0x00,
         ])
     }
 }
@@ -1063,11 +1061,8 @@ mod tests {
 
     #[test]
     fn select_ef_serialises_correctly() {
-        let apdu = SelectEfReturnFci { fid: [0x3F, 0x00] }.into_apdu();
-        assert_eq!(
-            apdu.as_bytes(),
-            &[0x00, 0xA4, 0x02, 0x00, 0x02, 0x3F, 0x00, 0x00]
-        );
+        let apdu = SelectEfNoFci { fid: [0x3F, 0x00] }.into_apdu();
+        assert_eq!(apdu.as_bytes(), &[0x00, 0xA4, 0x02, 0x0C, 0x02, 0x3F, 0x00]);
     }
 
     #[test]

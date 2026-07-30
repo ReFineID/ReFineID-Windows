@@ -121,6 +121,8 @@ use refineid_lib_core::crypto::rsa::HashAlg as PssHashAlg;
 #[cfg(windows)]
 use refineid_lib_core::identity::{TokenSerial, render_token_serial};
 #[cfg(windows)]
+use refineid_lib_core::pace::run_pace_with_can;
+#[cfg(windows)]
 use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
 use refineid_lib_core::pin_cache::PinSafetyCache;
@@ -133,10 +135,14 @@ use refineid_lib_core::sign::{KeyRef, SignOps, commands::ExternalHashValue};
 #[cfg(windows)]
 use refineid_lib_core::x509::{EcCurve, OwnedCert, PublicKeyAlgorithm, extract_rsa_public_key};
 #[cfg(windows)]
-use transport::{SCARD_ATTR_CURRENT_PROTOCOL_TYPE, ScardProtocol, WinScardTransport};
+use refineid_windows_credential_store::read_can;
+#[cfg(windows)]
+use transport::{
+    CardSessionTransport, SCARD_ATTR_CURRENT_PROTOCOL_TYPE, ScardProtocol, WinScardTransport,
+};
 
 #[cfg(windows)]
-fn live_token_serial(tx: &mut WinScardTransport) -> Result<TokenSerial, DWORD> {
+fn live_token_serial(tx: &mut CardSessionTransport) -> Result<TokenSerial, DWORD> {
     tx.read_token_info()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?
         .serial_number_hex
@@ -146,7 +152,7 @@ fn live_token_serial(tx: &mut WinScardTransport) -> Result<TokenSerial, DWORD> {
 }
 
 #[cfg(windows)]
-fn live_pin1_authentication_is_permitted(tx: &mut WinScardTransport) -> Result<bool, DWORD> {
+fn live_pin1_authentication_is_permitted(tx: &mut CardSessionTransport) -> Result<bool, DWORD> {
     tx.select_pkcs15_application()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     let pin1 = tx
@@ -233,17 +239,50 @@ pub(crate) unsafe extern "system" fn CardAcquireContext(
         ScardProtocol::T1
     };
 
-    let mut transport = WinScardTransport {
+    let mut raw_transport = WinScardTransport {
         h_card: cd.hScard,
         atr,
         protocol,
     };
 
-    let auth_cert_der = match transport.read_certificate(CertSlot::Authentication) {
-        Ok(cert) => cert.into_bytes(),
-        Err(_err) => {
-            Log::dbg("CardAcquireContext: failed to read authentication cert");
-            return SCARD_F_INTERNAL_ERROR;
+    let (mut transport, auth_cert_der) = match raw_transport
+        .read_certificate(CertSlot::Authentication)
+    {
+        Ok(cert) => (
+            CardSessionTransport::plain(raw_transport),
+            cert.into_bytes(),
+        ),
+        Err(_plain_error) => {
+            let can = match read_can(&raw_transport.atr) {
+                Ok(Some(can)) => can,
+                Ok(None) => {
+                    Log::dbg(
+                        "CardAcquireContext: authentication cert is sealed and NFC is not primed",
+                    );
+                    return SCARD_F_INTERNAL_ERROR;
+                }
+                Err(_error) => {
+                    Log::dbg("CardAcquireContext: Windows NFC credential lookup failed");
+                    return SCARD_F_INTERNAL_ERROR;
+                }
+            };
+            let _master_file_selection = raw_transport.select_mf();
+            let pace_session = match run_pace_with_can(&mut raw_transport, can) {
+                Ok(session) => session,
+                Err(_error) => {
+                    Log::dbg("CardAcquireContext: contactless PACE failed");
+                    return SCARD_F_INTERNAL_ERROR;
+                }
+            };
+            let mut protected = CardSessionTransport::protected(raw_transport, pace_session);
+            let cert = match protected.read_certificate(CertSlot::Authentication) {
+                Ok(cert) => cert.into_bytes(),
+                Err(_error) => {
+                    Log::dbg("CardAcquireContext: protected authentication cert read failed");
+                    return SCARD_F_INTERNAL_ERROR;
+                }
+            };
+            (protected, cert)
         }
     };
     let signature_cert_der = match transport.read_certificate(CertSlot::Signature) {
@@ -479,8 +518,8 @@ unsafe fn checked_card_data_and_ctx_mut<'a>(
 
 #[cfg(windows)]
 fn lock_transport(
-    transport: &Mutex<WinScardTransport>,
-) -> std::sync::MutexGuard<'_, WinScardTransport> {
+    transport: &Mutex<CardSessionTransport>,
+) -> std::sync::MutexGuard<'_, CardSessionTransport> {
     match transport.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -494,24 +533,46 @@ fn lock_transport(
 /// PIN verification no longer holds card-side (legacy parity).
 #[cfg(windows)]
 fn sync_transport_handle(
-    tx: &mut WinScardTransport,
+    tx: &mut CardSessionTransport,
     pin1_authenticated: &mut bool,
     pin2_authenticated: &mut bool,
     live_h_card: usize,
     site: &str,
-) -> bool {
-    if tx.h_card == live_h_card {
-        false
-    } else {
-        Log::dbg(&format!(
-            "{site}: transport hScard refresh {:#x} -> {:#x}",
-            tx.h_card, live_h_card
-        ));
-        tx.h_card = live_h_card;
-        *pin1_authenticated = false;
-        *pin2_authenticated = false;
-        true
+) -> Result<bool, DWORD> {
+    if tx.h_card() == live_h_card {
+        return Ok(false);
     }
+
+    Log::dbg(&format!(
+        "{site}: transport hScard refresh {:#x} -> {:#x}",
+        tx.h_card(),
+        live_h_card
+    ));
+    tx.raw_mut().h_card = live_h_card;
+    *pin1_authenticated = false;
+    *pin2_authenticated = false;
+
+    if tx.is_protected() {
+        let can = match read_can(tx.atr_bytes()) {
+            Ok(Some(can)) => can,
+            Ok(None) => {
+                Log::dbg(&format!("{site}: NFC credential is no longer configured"));
+                return Err(SCARD_F_INTERNAL_ERROR);
+            }
+            Err(_error) => {
+                Log::dbg(&format!("{site}: NFC credential lookup failed"));
+                return Err(SCARD_F_INTERNAL_ERROR);
+            }
+        };
+        let raw = tx.raw_mut();
+        let _master_file_selection = raw.select_mf();
+        let session = run_pace_with_can(raw, can).map_err(|_error| {
+            Log::dbg(&format!("{site}: PACE re-establishment failed"));
+            SCARD_F_INTERNAL_ERROR
+        })?;
+        tx.replace_pace_session(session);
+    }
+    Ok(true)
 }
 
 /// Re-verify the cached PIN on the card right before a private-key
@@ -525,7 +586,7 @@ fn reverify_cached_pin(
     pin_safety: &mut PinSafetyCache,
     pin1_authenticated: &mut bool,
     pin2_authenticated: &mut bool,
-    tx: &mut WinScardTransport,
+    tx: &mut CardSessionTransport,
     pin_id: DWORD,
 ) -> Option<DWORD> {
     if pin_id == PIN_ID_QUALIFIED_SIG {
@@ -1436,13 +1497,15 @@ unsafe extern "system" fn CardAuthenticatePin(
     };
 
     let mut tx = lock_transport(&ctx.transport);
-    sync_transport_handle(
+    if let Err(error) = sync_transport_handle(
         &mut tx,
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
         cd.hScard,
         "CardAuthenticatePin",
-    );
+    ) {
+        return error;
+    }
     // Any new explicit PIN operation invalidates previous positive state.
     clear_pin_state(
         &mut ctx.pin_safety,
@@ -1530,7 +1593,11 @@ unsafe extern "system" fn CardSignData(
     {
         let (pin1, pin2) = (&mut ctx.pin1_authenticated, &mut ctx.pin2_authenticated);
         let mut tx = lock_transport(&ctx.transport);
-        let handle_changed = sync_transport_handle(&mut tx, pin1, pin2, cd.hScard, "CardSignData");
+        let handle_changed =
+            match sync_transport_handle(&mut tx, pin1, pin2, cd.hScard, "CardSignData") {
+                Ok(changed) => changed,
+                Err(error) => return error,
+            };
         drop(tx);
         if handle_changed {
             clear_pin_state(&mut ctx.pin_safety, pin1, pin2);
@@ -1640,7 +1707,7 @@ unsafe extern "system" fn CardSignData(
         }
         Log::dbg(&format!(
             "CardSignData PSS native: protocol={:?} digest_len={}",
-            tx.protocol,
+            tx.protocol(),
             in_bytes.len()
         ));
         let sig = tx.sign_pre_hashed_rsa_pss(key_ref, hash);
@@ -2292,13 +2359,15 @@ unsafe extern "system" fn CardAuthenticateEx(
     };
 
     let mut tx = lock_transport(&ctx.transport);
-    sync_transport_handle(
+    if let Err(error) = sync_transport_handle(
         &mut tx,
         &mut ctx.pin1_authenticated,
         &mut ctx.pin2_authenticated,
         cd.hScard,
         "CardAuthenticateEx",
-    );
+    ) {
+        return error;
+    }
     clear_pin_state(
         &mut ctx.pin_safety,
         &mut ctx.pin1_authenticated,

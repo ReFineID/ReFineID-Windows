@@ -34,7 +34,10 @@
 //! - `read_authentication_certificate` -- composes the three
 //!   above: SELECT PKCS#15, SELECT EF.4331, read the X.509 DER blob.
 //!
-use crate::apdu::iso7816::{ReadBinaryByOffset, SelectByAidNoFci, SelectEfReturnFci};
+use crate::apdu::iso7816::{
+    ApduClass, FileId, ReadBinaryByOffset, SelectByAidNoFci, SelectEfNoFci, SelectFile,
+    SelectFileResponseMode, SelectFileTarget,
+};
 use crate::apdu::primitives::{Aid, AidError};
 use crate::apdu::status_word::StatusWord;
 use crate::transport::{CardTransport, TransportDispatchError};
@@ -136,7 +139,7 @@ pub enum CertSlot {
 
 impl CertSlot {
     /// Project this slot to its 2-byte file ID (`EF.4331` etc.).
-    /// The lookup feeds [`SelectEfReturnFci::fid`].
+    /// The lookup feeds [`SelectEfNoFci::fid`].
     #[must_use]
     #[inline]
     pub const fn fid(self) -> [u8; 2] {
@@ -231,6 +234,51 @@ const READ_CHUNK: u8 = 0x80;
 /// variants.
 const MAX_CERT_BYTES: usize = 0x4000;
 
+/// Return the total encoded length of the single-byte-tag DER object
+/// at the start of `prefix` once its complete length field is present.
+///
+/// This intentionally matches the bounded subset used by the current
+/// Apple port: short-form lengths and long-form lengths containing one
+/// or two octets. `Ok(None)` means the header is not complete yet;
+/// `Err(())` means the length field is malformed.
+fn der_object_total_length(prefix: &[u8]) -> Result<Option<usize>, ()> {
+    const TAG_AND_FIRST_LENGTH_OCTET: usize = 2;
+    const MAXIMUM_LENGTH_OCTETS: usize = 2;
+    const LONG_FORM_MASK: u8 = 0x80;
+    const LENGTH_COUNT_MASK: u8 = 0x7F;
+
+    if prefix.len() < TAG_AND_FIRST_LENGTH_OCTET {
+        return Ok(None);
+    }
+    let first = prefix[1];
+    if first & LONG_FORM_MASK == 0 {
+        return TAG_AND_FIRST_LENGTH_OCTET
+            .checked_add(usize::from(first))
+            .map(Some)
+            .ok_or(());
+    }
+
+    let octet_count = usize::from(first & LENGTH_COUNT_MASK);
+    if octet_count == 0 || octet_count > MAXIMUM_LENGTH_OCTETS {
+        return Err(());
+    }
+    let header_len = TAG_AND_FIRST_LENGTH_OCTET
+        .checked_add(octet_count)
+        .ok_or(())?;
+    if prefix.len() < header_len {
+        return Ok(None);
+    }
+
+    let mut content_len = 0_usize;
+    for byte in &prefix[TAG_AND_FIRST_LENGTH_OCTET..header_len] {
+        content_len = content_len
+            .checked_shl(8)
+            .and_then(|length| length.checked_add(usize::from(*byte)))
+            .ok_or(())?;
+    }
+    header_len.checked_add(content_len).map(Some).ok_or(())
+}
+
 /// Error returned from PKCS#15 cert reads and EF.TokenInfo
 /// parses.
 #[derive(Debug)]
@@ -322,25 +370,41 @@ pub trait Pkcs15Ops: CardTransport {
         Ok(())
     }
 
-    /// SELECT an EF by 2-byte file ID under the current DF.
+    /// SELECT an EF by 2-byte file ID without response data.
     ///
-    /// Returns the [`Fci`] the card sent back.
+    /// The current Apple implementation first tries P1=02
+    /// (EF under current DF), then P1=00 (any file by ID).
+    /// Both variants were established against real FINEID card
+    /// generations and use P2=0C with no trailing Le.
     ///
     /// # Errors
     /// Transport-level failures or a non-success status word.
     #[inline]
-    fn select_ef(&mut self, fid: [u8; 2]) -> Result<Fci, Pkcs15Error<TxError<Self>>>
+    fn select_ef(&mut self, fid: [u8; 2]) -> Result<(), Pkcs15Error<TxError<Self>>>
     where
         Self: Sized,
     {
-        let apdu = SelectEfReturnFci { fid }.into_apdu();
-        let r = self
-            .transmit(apdu.as_bytes())
-            .map_err(Pkcs15Error::Transport)?;
-        if !r.is_ok() {
-            return Err(Pkcs15Error::Sw(r.sw()));
+        let file_id = FileId::new(fid);
+        let attempts = [
+            SelectEfNoFci { fid }.into_apdu(),
+            SelectFile {
+                class: ApduClass::Plain,
+                target: SelectFileTarget::AnyByFileId(Some(file_id)),
+                response_mode: SelectFileResponseMode::None,
+            }
+            .into_apdu(),
+        ];
+        let mut last_sw = 0_u16;
+        for apdu in attempts {
+            let response = self
+                .transmit(apdu.as_bytes())
+                .map_err(Pkcs15Error::Transport)?;
+            if response.is_ok() {
+                return Ok(());
+            }
+            last_sw = response.sw();
         }
-        Ok(Fci::new(r.body))
+        Err(Pkcs15Error::Sw(last_sw))
     }
 
     /// SELECT MF (`3F00`). Tries `P1=0x00` then `P1=0x04` because
@@ -455,6 +519,87 @@ pub trait Pkcs15Ops: CardTransport {
         Ok(collected)
     }
 
+    /// Read exactly one DER object from the currently selected EF.
+    ///
+    /// The first chunk supplies the DER header. Once its declared total
+    /// length is known, the last `READ BINARY` requests exactly the
+    /// remaining bytes. This mirrors the current Apple implementation
+    /// and avoids both padded-EF bytes and cards that reject an
+    /// overlong final read instead of returning a partial body.
+    ///
+    /// # Errors
+    /// Transport failure, unexpected status, malformed/truncated DER,
+    /// an empty response, or a declared object above the 16 KiB cap.
+    #[inline]
+    fn read_binary_der_object(
+        &mut self,
+        what: &'static str,
+    ) -> Result<Vec<u8>, Pkcs15Error<TxError<Self>>>
+    where
+        Self: Sized,
+    {
+        let mut collected = Vec::with_capacity(2048);
+        let mut total_length: Option<usize> = None;
+
+        loop {
+            let cap = total_length.unwrap_or(MAX_CERT_BYTES);
+            if collected.len() >= cap {
+                collected.truncate(cap);
+                return Ok(collected);
+            }
+
+            let remaining = cap
+                .checked_sub(collected.len())
+                .ok_or(Pkcs15Error::TooLarge)?;
+            let want_usize = remaining.min(usize::from(READ_CHUNK));
+            let want = u8::try_from(want_usize).or(Err(Pkcs15Error::TooLarge))?;
+            let offset = u16::try_from(collected.len()).or(Err(Pkcs15Error::TooLarge))?;
+            let apdu = ReadBinaryByOffset { offset, le: want }.into_apdu();
+            let response = self
+                .transmit(apdu.as_bytes())
+                .map_err(Pkcs15Error::Transport)?;
+            let eof = matches!(response.status_word(), StatusWord::EndOfFile);
+            if !response.is_ok() && !eof {
+                return Err(Pkcs15Error::Sw(response.sw()));
+            }
+            if response.body.len() > usize::from(want) {
+                return Err(Pkcs15Error::InvalidData(what));
+            }
+            if response.body.is_empty() {
+                return if collected.is_empty() {
+                    Err(Pkcs15Error::Empty)
+                } else {
+                    Err(Pkcs15Error::InvalidData(what))
+                };
+            }
+
+            let body_len = response.body.len();
+            collected.extend_from_slice(&response.body);
+
+            if total_length.is_none() {
+                let parsed = der_object_total_length(&collected)
+                    .map_err(|()| Pkcs15Error::InvalidData(what))?;
+                if let Some(total) = parsed {
+                    if total > MAX_CERT_BYTES {
+                        return Err(Pkcs15Error::TooLarge);
+                    }
+                    total_length = Some(total);
+                }
+            }
+
+            if let Some(total) = total_length
+                && collected.len() >= total
+            {
+                collected.truncate(total);
+                return Ok(collected);
+            }
+
+            if body_len < usize::from(want) || eof {
+                return Err(Pkcs15Error::InvalidData(what));
+            }
+        }
+    }
+
     /// Generic single-cert read; routes to the right SELECT chain
     /// per slot path. See [`CertSlot`] doc for the routing rules.
     ///
@@ -473,22 +618,19 @@ pub trait Pkcs15Ops: CardTransport {
         let bytes = match slot.path() {
             SlotPath::UnderPkcs15App => {
                 self.select_pkcs15_application()?;
-                let fci = self.select_ef(slot.fid())?;
-                let size = fci.parse_file_size();
-                self.read_binary_to_end(size)?
+                self.select_ef(slot.fid())?;
+                self.read_binary_der_object(slot.label())?
             }
             SlotPath::UnderDf5016 => {
                 self.select_mf()?;
                 self.select_child_df([0x50, 0x16])?;
-                let fci = self.select_ef(slot.fid())?;
-                let size = fci.parse_file_size();
-                self.read_binary_to_end(size)?
+                self.select_ef(slot.fid())?;
+                self.read_binary_der_object(slot.label())?
             }
             SlotPath::UnderMf => {
                 self.select_mf()?;
-                let fci = self.select_ef(slot.fid())?;
-                let size = fci.parse_file_size();
-                self.read_binary_to_end(size)?
+                self.select_ef(slot.fid())?;
+                self.read_binary_der_object(slot.label())?
             }
         };
         Ok(crate::cert_state::CertDer::new(bytes))
@@ -505,9 +647,8 @@ pub trait Pkcs15Ops: CardTransport {
         Self: Sized,
     {
         self.select_pkcs15_application()?;
-        let fci = self.select_ef(EF_TOKEN_INFO_FID)?;
-        let size = fci.parse_file_size();
-        let bytes = self.read_binary_to_end(size)?;
+        self.select_ef(EF_TOKEN_INFO_FID)?;
+        let bytes = self.read_binary_der_object("EF.TokenInfo")?;
         // Fail closed on a bad parse rather than defaulting (a wrong card
         // generation is worse than a clear error). InvalidData carries a
         // static label, not the parse error, so name-ignore it (clippy
@@ -1384,15 +1525,28 @@ mod tests {
 
     #[test]
     fn select_ef_apdu_layout() {
-        // P2=0x00 (return FCI), Le=0x00 (max). Card replies with a
-        // tiny synthesised FCI declaring file size 0x06f4 = 1780.
-        let fci = hex::decode("62088102001183010180020780").expect("FCI fixture hex decodes");
         let mut tx = ScriptedTransport::new(vec![(
-            vec![0x00, 0xA4, 0x02, 0x00, 0x02, 0x43, 0x31, 0x00],
-            ok(&fci),
+            vec![0x00, 0xA4, 0x02, 0x0C, 0x02, 0x43, 0x31],
+            ok(&[]),
         )]);
-        let out = tx.select_ef(EF_AUTH_CERT_FID).expect("selects");
-        assert_eq!(out.as_bytes(), fci.as_slice());
+        tx.select_ef(EF_AUTH_CERT_FID).expect("selects");
+    }
+
+    #[test]
+    fn select_ef_falls_back_to_any_file_by_id() {
+        let mut tx = ScriptedTransport::new(vec![
+            (
+                vec![0x00, 0xA4, 0x02, 0x0C, 0x02, 0x43, 0x31],
+                ResponseApdu {
+                    body: Vec::new(),
+                    sw1: 0x6A,
+                    sw2: 0x82,
+                },
+            ),
+            (vec![0x00, 0xA4, 0x00, 0x0C, 0x02, 0x43, 0x31], ok(&[])),
+        ]);
+        tx.select_ef(EF_AUTH_CERT_FID)
+            .expect("fallback selection succeeds");
     }
 
     /// FINEID's FCI uses tag `80` with a 2-byte big-endian file size.
@@ -1462,6 +1616,36 @@ mod tests {
     }
 
     #[test]
+    fn read_der_object_discards_padding_from_first_chunk() {
+        let expected = [0x30, 0x02, 0x05, 0x00];
+        let mut padded = vec![0_u8; 0x80];
+        padded[..expected.len()].copy_from_slice(&expected);
+        let mut tx =
+            ScriptedTransport::new(vec![(vec![0x00, 0xB0, 0x00, 0x00, 0x80], ok(&padded))]);
+
+        let out = tx
+            .read_binary_der_object("test object")
+            .expect("reads one object");
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn read_der_object_pins_the_final_chunk_to_declared_length() {
+        let mut object = vec![0x30, 0x82, 0x01, 0x00];
+        object.extend(core::iter::repeat_n(0xA5, 0x100));
+        let mut tx = ScriptedTransport::new(vec![
+            (vec![0x00, 0xB0, 0x00, 0x00, 0x80], ok(&object[..0x80])),
+            (vec![0x00, 0xB0, 0x00, 0x80, 0x80], ok(&object[0x80..0x100])),
+            (vec![0x00, 0xB0, 0x01, 0x00, 0x04], ok(&object[0x100..])),
+        ]);
+
+        let out = tx
+            .read_binary_der_object("test object")
+            .expect("reads one object");
+        assert_eq!(out, object);
+    }
+
+    #[test]
     fn read_binary_handles_eof_marker() {
         let chunk_a = vec![0xAA; 0x80];
         // Card returns `SW=6282` (EOF reached) on the second read
@@ -1499,12 +1683,11 @@ mod tests {
     }
 
     /// End-to-end SELECT+SELECT+READ flow against a tiny script.
-    /// The card returns an FCI announcing a 4-byte file; we read
-    /// exactly 4 bytes and stop.
+    /// The SELECT asks for no FCI and the short READ response ends
+    /// the file.
     #[test]
     fn read_authentication_certificate_drives_full_sequence() {
-        let cert = vec![0x30_u8, 0x82, 0x01, 0x00];
-        let fci = hex::decode("6203800104").expect("FCI fixture hex decodes"); // 62 03 80 01 04
+        let cert = vec![0x30_u8, 0x02, 0x05, 0x00];
         let mut tx = ScriptedTransport::new(vec![
             // SELECT PKCS#15 application (P2=0x0C, no FCI on the
             // app SELECT).
@@ -1515,14 +1698,11 @@ mod tests {
                 ],
                 ok(&[]),
             ),
-            // SELECT EF.4331 with FCI returned.
-            (
-                vec![0x00, 0xA4, 0x02, 0x00, 0x02, 0x43, 0x31, 0x00],
-                ok(&fci),
-            ),
-            // READ BINARY -- Le pinned to file size from FCI (4
-            // bytes).
-            (vec![0x00, 0xB0, 0x00, 0x00, 0x04], ok(&cert)),
+            // SELECT EF.4331 without response data.
+            (vec![0x00, 0xA4, 0x02, 0x0C, 0x02, 0x43, 0x31], ok(&[])),
+            // READ BINARY -- the four-byte response is short and
+            // therefore terminates the read.
+            (vec![0x00, 0xB0, 0x00, 0x00, 0x80], ok(&cert)),
         ]);
         let der = tx
             .read_certificate(CertSlot::Authentication)
@@ -1594,13 +1774,10 @@ mod tests {
         vec![
             // SELECT MF, first attempt (P1=0x00) accepted.
             (vec![0x00, 0xA4, 0x00, 0x0C, 0x02, 0x3F, 0x00], ok(&[])),
-            // SELECT EF.CardAccess (011C) with FCI: file size 0x2A.
-            (
-                vec![0x00, 0xA4, 0x02, 0x00, 0x02, 0x01, 0x1C, 0x00],
-                ok(&[0x62, 0x04, 0x80, 0x02, 0x00, 0x2A]),
-            ),
+            // SELECT EF.CardAccess (011C) without response data.
+            (vec![0x00, 0xA4, 0x02, 0x0C, 0x02, 0x01, 0x1C], ok(&[])),
             // READ BINARY, whole 42-byte file in one chunk.
-            (vec![0x00, 0xB0, 0x00, 0x00, 0x2A], ok(&body)),
+            (vec![0x00, 0xB0, 0x00, 0x00, 0x80], ok(&body)),
         ]
     }
 

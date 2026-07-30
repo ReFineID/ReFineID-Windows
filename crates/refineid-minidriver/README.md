@@ -41,22 +41,22 @@ minidriver.
 
 ## Contactless NFC
 
-Contactless FINEID S4-1 v4.0 is not yet exposed through this alpha minidriver.
-The card presents a PC/SC pseudo-ATR and seals PKCS #15 behind PACE. On the same
-Windows host, the shared Rust core has successfully opened PACE with the
-card-specific CAN through an ACS ACR1581 PICC reader and completed the protected
-read. This proves the reader, card radio, CAN, and PACE implementation.
+Contactless FINEID S4-1 v4.0 is implemented as an experimental path. The card
+presents a PC/SC contactless ATR and seals PKCS #15 behind PACE. ReFineID
+Settings first proves the CAN against the card and saves only that CAN in the
+current user's Windows Credential Manager, keyed by the complete ATR. The
+minidriver uses the stored CAN to establish secure messaging before certificate
+discovery and repeats PACE when Windows replaces its PC/SC handle.
 
-Two Windows integration pieces are still required:
+The development installer accepts the exact observed ATR through
+`-ContactlessAtrHex` and registers it with an all-bytes mask. It deliberately
+does not ship a broad pseudo-ATR mask, which could select this minidriver for an
+unrelated contactless card.
 
-- a carefully masked pseudo-ATR registration that selects only this FINEID
-  family; and
-- a secure, card-bound CAN prime store that lets `CardAcquireContext` establish
-  PACE before it reads and publishes certificate containers.
-
-Adding only the pseudo-ATR registration would turn an unknown-card report into
-an early certificate-read failure. Contact-mode browser and KSP use remains the
-supported alpha path until both pieces land.
+The underlying PACE and protected-read sequence has passed on Windows with an
+ACS ACR1581 PICC reader. The new Credential Manager-to-Card Module handoff still
+requires real-reader acceptance. Contact-mode browser and KSP use remains the
+supported alpha path until that test passes.
 
 ## Qualified electronic signing
 
@@ -127,5 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ```
 
 The development installer registers both supported FINEID ATR families and
-restarts the Windows smart-card services. It rejects unsigned DLLs unless the
-operator explicitly selects `-AllowUnsigned`.
+restarts the Windows smart-card services. Supplying the exact contactless ATR
+through `-ContactlessAtrHex` adds the experimental S4-1 v4.0 NFC registration.
+It rejects unsigned DLLs unless the operator explicitly selects
+`-AllowUnsigned`.

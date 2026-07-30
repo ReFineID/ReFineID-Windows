@@ -194,6 +194,35 @@ impl<T: CardTransport> SmTransport<T> {
         self.inner
     }
 
+    /// Borrow the underlying raw transport without sending an SM command.
+    ///
+    /// This is used only by platform adapters that must refresh an
+    /// OS-owned card handle or re-establish PACE after the OS reset the card.
+    #[inline]
+    pub const fn inner(&self) -> &T {
+        &self.inner
+    }
+
+    /// Mutably borrow the underlying raw transport without sending an SM
+    /// command.
+    ///
+    /// Callers must not issue ordinary application APDUs through this borrow
+    /// while the current SM session is live. The intended use is the
+    /// pre-PACE reset and handshake that replaces that session immediately.
+    #[inline]
+    pub const fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    /// Replace every PACE-derived SM value after the operating system reset
+    /// the card and a new PACE handshake completed on the raw transport.
+    #[inline]
+    pub fn replace_session(&mut self, session: PaceSession) {
+        self.k_enc = session.k_enc;
+        self.k_mac = session.k_mac;
+        self.ssc = session.ssc;
+    }
+
     /// Replace the SM session keys with a freshly-derived pair
     /// (post-CA / post-rekey) and reset the SSC to all zero.
     ///
@@ -434,16 +463,15 @@ impl<T: CardTransport> CardTransport for SmTransport<T> {
             TransportOutcome::Response(response) => response,
             other => return Ok(other),
         };
-        // An outer non-9000 SW means the card refused the SM-wrapped
-        // command at transport level (e.g. wrong SM session). Pass
-        // it back with empty body so the caller can distinguish from
-        // an inner application error.
-        if !raw.is_ok() {
-            return Ok(TransportOutcome::Response(ResponseApdu {
-                body: Vec::new(),
-                sw1: raw.sw1,
-                sw2: raw.sw2,
-            }));
+        // A protected response body must always be unwrapped, even
+        // when the outer status is not 9000. FINEID can return an
+        // outer warning such as 6282 while still carrying authenticated
+        // DO99/DO8E data. The card has already advanced its SSC to MAC
+        // that body, so skipping unwrap would desynchronise every later
+        // exchange. Only a bare response with no protected body is a
+        // transport-level refusal that can pass through unchanged.
+        if raw.body.is_empty() {
+            return Ok(TransportOutcome::Response(raw));
         }
         let (body, sw) = self.unwrap(&raw.body)?;
         let [sw1, sw2] = sw.to_be_bytes();
@@ -724,6 +752,75 @@ mod tests {
         assert_eq!(wrapped[3], 0x0C);
     }
 
+    #[test]
+    fn protected_body_is_unwrapped_despite_outer_warning() {
+        let k_enc = [0x42_u8; 32];
+        let k_mac = [0x77_u8; 32];
+        let payload = [0xAA_u8, 0xBB];
+
+        let mut card = SmTransport::new(
+            NullTransport,
+            PaceSession {
+                k_enc: Aes256Key::from_bytes(k_enc).expect("non-zero test key"),
+                k_mac: Aes256Key::from_bytes(k_mac).expect("non-zero test key"),
+                ssc: Ssc::INITIAL,
+            },
+        );
+        card.increment_ssc();
+        card.increment_ssc();
+
+        let padded = SmHelpers::iso7816_4_pad(&payload);
+        let iv = aes256_ecb_encrypt_block(card.k_enc.as_bytes(), card.ssc.as_bytes());
+        let cipher = aes256_cbc_encrypt_no_padding(card.k_enc.as_bytes(), &iv, &padded)
+            .expect("padded payload is block-aligned");
+        let mut do87_value = Vec::with_capacity(1_usize.saturating_add(cipher.len()));
+        do87_value.push(DO87_PADDING_INDICATOR);
+        do87_value.extend_from_slice(cipher.as_bytes());
+        let cryptogram_object = ber::tlv(TAG_DO87, &do87_value);
+        let status_object = ber::tlv(TAG_DO99, [0x62, 0x82]);
+
+        let mut mac_input = Vec::new();
+        mac_input.extend_from_slice(card.ssc.as_bytes());
+        mac_input.extend_from_slice(&cryptogram_object);
+        mac_input.extend_from_slice(&status_object);
+        let mac_input = SmHelpers::iso7816_4_pad(&mac_input);
+        let tag = aes256_cmac_truncated(card.k_mac.as_bytes(), &mac_input);
+        let mac_object = ber::tlv(TAG_DO8E, tag.as_bytes());
+
+        let mut protected_body = Vec::new();
+        protected_body.extend_from_slice(&cryptogram_object);
+        protected_body.extend_from_slice(&status_object);
+        protected_body.extend_from_slice(&mac_object);
+
+        let inner = FixedResponseTransport {
+            response: Some(ResponseApdu {
+                body: protected_body,
+                sw1: 0x62,
+                sw2: 0x82,
+            }),
+        };
+        let mut pcd = SmTransport::new(
+            inner,
+            PaceSession {
+                k_enc: Aes256Key::from_bytes(k_enc).expect("non-zero test key"),
+                k_mac: Aes256Key::from_bytes(k_mac).expect("non-zero test key"),
+                ssc: Ssc::INITIAL,
+            },
+        );
+        let outcome = pcd
+            .transmit_outcome(&CommandApdu::from(&[0x00, 0xB0, 0x00, 0x00, 0x02]))
+            .expect("protected warning response is accepted");
+        assert_eq!(
+            outcome,
+            TransportOutcome::Response(ResponseApdu {
+                body: payload.to_vec(),
+                sw1: 0x62,
+                sw2: 0x82,
+            })
+        );
+        assert_eq!(pcd.ssc, card.ssc);
+    }
+
     /// A tampered DO87 must trip the MAC mismatch check.
     #[test]
     fn unwrap_rejects_mac_mismatch() {
@@ -763,6 +860,25 @@ mod tests {
         fn transmit_outcome(&mut self, _: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
             unreachable!("NullTransport is for direct wrap/unwrap testing")
         }
+        fn atr(&self) -> Result<Atr, AtrError> {
+            Atr::new(MINIMAL_DIRECT_ATR)
+        }
+    }
+
+    struct FixedResponseTransport {
+        response: Option<ResponseApdu>,
+    }
+
+    impl CardTransport for FixedResponseTransport {
+        type Error = String;
+
+        fn transmit_outcome(&mut self, _: &CommandApdu) -> Result<TransportOutcome, Self::Error> {
+            self.response
+                .take()
+                .map(TransportOutcome::Response)
+                .ok_or_else(|| "fixed response already consumed".to_owned())
+        }
+
         fn atr(&self) -> Result<Atr, AtrError> {
             Atr::new(MINIMAL_DIRECT_ATR)
         }

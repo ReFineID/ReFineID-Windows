@@ -19,8 +19,8 @@
 //! values that cross trust boundaries. The CAN crosses a real
 //! one: it's operator input (typed at a CLI prompt or piped
 //! from an LDIF / config) and reaches the card via the PACE
-//! key-derivation path. Wrong length or non-digit bytes there
-//! burn one of the card's 5 try-counter slots.
+//! key-derivation path. A wrong CAN does not consume a retry
+//! counter, but the card can suspend it until a power reset.
 //!
 //! The CAN is **not secret** -- it's optically public on the
 //! card front. We type it for *shape*, not for confidentiality

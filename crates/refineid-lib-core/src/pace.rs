@@ -415,8 +415,9 @@ pub struct PaceMidwayState {
 /// run the protected command chain through that. On failure the
 /// transport is returned to the caller untouched (the `&mut`
 /// borrow ends); whether the card is still in a usable state
-/// depends on the failure -- a wrong CAN burns a PACE attempt but
-/// the session survives, a card reset does not.
+/// depends on the failure. A wrong CAN consumes no retry counter,
+/// but the card can suspend the password until a power reset; a
+/// card reset ends the session entirely.
 ///
 /// # Errors
 /// Transport, BER-decode, card status-word, off-curve-point, or

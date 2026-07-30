@@ -35,7 +35,7 @@ use crate::ffi::{
     MAX_CONTAINER_NAME_LEN, PBYTE, PVOID, ROLE_ADMIN, ROLE_USER, SCARD_E_NO_MEMORY,
     SCARD_E_UNSUPPORTED_FEATURE, SCARD_S_SUCCESS,
 };
-use crate::transport::WinScardTransport;
+use crate::transport::CardSessionTransport;
 use refineid_lib_core::pin_cache::PinSafetyCache;
 use refineid_lib_core::sign::{KEY_REF_AUTH, KEY_REF_SIGN};
 use refineid_lib_core::x509::{
@@ -45,7 +45,7 @@ use refineid_lib_core::x509::{
 /// Per-`CardAcquireContext` state, stored behind `CARD_DATA`'s
 /// `pvVendorSpecific` for the life of the Card Module context.
 pub(crate) struct Ctx {
-    pub(crate) transport: Mutex<WinScardTransport>,
+    pub(crate) transport: Mutex<CardSessionTransport>,
     pub(crate) card: CardCapabilityModel,
     /// Whether PIN1 has been verified in this Card Module context.
     pub(crate) pin1_authenticated: bool,

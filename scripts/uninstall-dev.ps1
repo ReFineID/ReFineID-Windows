@@ -15,7 +15,8 @@ $backupDirectory = Join-Path $env:ProgramData 'ReFineID\backup'
 $backup = Join-Path $backupDirectory 'refineid_minidriver.dll'
 $registryKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v3.1',
-    'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0'
+    'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0',
+    'HKLM:\SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0-contactless'
 )
 
 if (-not $PSCmdlet.ShouldProcess('ReFineID development minidriver', 'Uninstall')) {
