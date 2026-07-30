@@ -35,6 +35,25 @@ with FINEID S4-1 v3.1 and v4.0 cards, including:
 The public repository rebuilds and revalidates those paths. Hardware acceptance
 still requires a real card and reader; CI cannot replace that proof.
 
+### Contactless NFC status
+
+The browser and Windows KSP tests above currently use the contact interface.
+The FINEID S4-1 v4.0 card and an ACS ACR1581 PICC reader have separately passed
+the shared Rust core's contactless `EF.CardAccess`, PACE, and protected eMRTD
+read on Windows.
+
+The alpha minidriver does not yet expose that path to Windows applications:
+
+- Windows receives a PC/SC contactless pseudo-ATR instead of the card's contact
+  ATR, so the current installer registration does not select this minidriver.
+- The card keeps PKCS #15 certificates and keys behind PACE on the contactless
+  interface. The minidriver needs a secure, card-bound CAN provisioning flow
+  before `CardAcquireContext` can read those certificates.
+
+Registering the pseudo-ATR alone is not a fix: it would select the DLL, but the
+first certificate read would still fail before PACE. Use the contact interface
+for Edge, Chrome, Schannel, and CNG until the Windows NFC prime flow is present.
+
 ## Build
 
 Requirements:

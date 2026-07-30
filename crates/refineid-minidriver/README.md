@@ -39,6 +39,25 @@ path. Firefox integration is separate: Firefox must load Windows OS client
 certificates or use a configured PKCS#11 module before it can reach this
 minidriver.
 
+## Contactless NFC
+
+Contactless FINEID S4-1 v4.0 is not yet exposed through this alpha minidriver.
+The card presents a PC/SC pseudo-ATR and seals PKCS #15 behind PACE. On the same
+Windows host, the shared Rust core has successfully opened PACE with the
+card-specific CAN through an ACS ACR1581 PICC reader and completed the protected
+read. This proves the reader, card radio, CAN, and PACE implementation.
+
+Two Windows integration pieces are still required:
+
+- a carefully masked pseudo-ATR registration that selects only this FINEID
+  family; and
+- a secure, card-bound CAN prime store that lets `CardAcquireContext` establish
+  PACE before it reads and publishes certificate containers.
+
+Adding only the pseudo-ATR registration would turn an unknown-card report into
+an early certificate-read failure. Contact-mode browser and KSP use remains the
+supported alpha path until both pieces land.
+
 ## Qualified electronic signing
 
 The minidriver exposes both physical certificate/key slots:
