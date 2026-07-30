@@ -15,7 +15,7 @@
 //! Refined FINEID PIN retry-risk states and consumer safety floors.
 
 use crate::apdu::status_word::PinRetries;
-use crate::auth::{PinStatus, PukStatus};
+use crate::auth::PinStatus;
 
 /// Security severity derived from the FINEID five-attempt PIN counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -95,37 +95,23 @@ impl PinRetryRisk {
     }
 }
 
-/// Whether all three live FINEID credential retry counters permit retaining
-/// or sending a cached PIN1. Unknown, verified-without-a-counter, malformed,
-/// and locked states all fail closed.
+/// Whether a live PIN1 retry result permits an ordinary consumer
+/// authentication operation.
+///
+/// PIN2 and PUK are intentionally absent: authentication cannot consume
+/// either credential, so their state must not block PIN1. Unknown, malformed,
+/// and locked states fail closed. `Verified` is safe because the card has
+/// already accepted PIN1 in the current security context.
 #[must_use]
-pub const fn pin1_cache_counters_are_pristine(
-    pin1: PinStatus,
-    pin2: PinStatus,
-    puk: PukStatus,
-) -> bool {
-    matches!(
-        pin1,
-        PinStatus::Remaining(retries)
-            if matches!(
-                PinRetryRisk::from_retries(retries),
-                Some(PinRetryRisk::NormalOperatingConditions)
-            )
-    ) && matches!(
-        pin2,
-        PinStatus::Remaining(retries)
-            if matches!(
-                PinRetryRisk::from_retries(retries),
-                Some(PinRetryRisk::NormalOperatingConditions)
-            )
-    ) && matches!(
-        puk,
-        PukStatus::Remaining(retries)
-            if matches!(
-                PinRetryRisk::from_retries(retries),
-                Some(PinRetryRisk::NormalOperatingConditions)
-            )
-    )
+pub const fn pin1_status_permits_consumer_authentication(pin1: PinStatus) -> bool {
+    match pin1 {
+        PinStatus::Verified => true,
+        PinStatus::Remaining(retries) => matches!(
+            PinRetryRisk::from_retries(retries),
+            Some(risk) if risk.permits_consumer()
+        ),
+        PinStatus::Locked | PinStatus::NoInfo | PinStatus::Other(_) => false,
+    }
 }
 
 #[cfg(test)]
@@ -161,41 +147,29 @@ mod tests {
     }
 
     #[test]
-    fn cached_pin1_requires_all_counters_at_five() {
+    fn consumer_pin1_authentication_depends_only_on_pin1_retry_floor() {
         let remaining = |count| {
             PinStatus::Remaining(
                 PinRetries::from_nibble(count).expect("test retry count fits one nibble"),
             )
         };
-        let puk_remaining = |count| {
-            PukStatus::Remaining(
-                PinRetries::from_nibble(count).expect("test retry count fits one nibble"),
-            )
-        };
-        assert!(pin1_cache_counters_are_pristine(
-            remaining(5),
-            remaining(5),
-            puk_remaining(5)
+        assert!(pin1_status_permits_consumer_authentication(remaining(5)));
+        assert!(pin1_status_permits_consumer_authentication(remaining(4)));
+        assert!(pin1_status_permits_consumer_authentication(remaining(3)));
+        assert!(!pin1_status_permits_consumer_authentication(remaining(2)));
+        assert!(!pin1_status_permits_consumer_authentication(remaining(1)));
+        assert!(!pin1_status_permits_consumer_authentication(remaining(0)));
+        assert!(pin1_status_permits_consumer_authentication(
+            PinStatus::Verified
         ));
-        assert!(!pin1_cache_counters_are_pristine(
-            remaining(4),
-            remaining(5),
-            puk_remaining(5)
+        assert!(!pin1_status_permits_consumer_authentication(
+            PinStatus::Locked
         ));
-        assert!(!pin1_cache_counters_are_pristine(
-            remaining(5),
-            remaining(4),
-            puk_remaining(5)
+        assert!(!pin1_status_permits_consumer_authentication(
+            PinStatus::NoInfo
         ));
-        assert!(!pin1_cache_counters_are_pristine(
-            remaining(5),
-            remaining(5),
-            puk_remaining(4)
-        ));
-        assert!(!pin1_cache_counters_are_pristine(
-            PinStatus::Verified,
-            remaining(5),
-            puk_remaining(5)
+        assert!(!pin1_status_permits_consumer_authentication(
+            PinStatus::Other(0x63_00)
         ));
     }
 }

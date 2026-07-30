@@ -1,5 +1,8 @@
 [CmdletBinding()]
-param()
+param(
+    [ValidateSet('All', 'Authentication', 'Qualified')]
+    [string]$Role = 'All'
+)
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -16,9 +19,43 @@ if (-not $certificates) {
     throw 'No FINEID card certificate with a private key was found.'
 }
 
+$certificateCases = foreach ($certificate in $certificates) {
+    $keyUsage = $certificate.Extensions |
+        Where-Object { $_.Oid.Value -eq '2.5.29.15' } |
+        Select-Object -First 1
+    if (-not ($keyUsage -is [Security.Cryptography.X509Certificates.X509KeyUsageExtension])) {
+        continue
+    }
+
+    $isQualified = (
+        $keyUsage.KeyUsages -band
+        [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::NonRepudiation
+    ) -ne 0
+    $certificateRole = if ($isQualified) { 'Qualified' } else { 'Authentication' }
+    if ($Role -ne 'All' -and $Role -ne $certificateRole) {
+        continue
+    }
+
+    [pscustomobject]@{
+        Certificate = $certificate
+        Role        = $certificateRole
+    }
+}
+if (-not $certificateCases) {
+    throw "No $Role FINEID card certificate with a private key was found."
+}
+
 $data = [Text.Encoding]::UTF8.GetBytes('ReFineID sign test payload')
 $testedKeys = 0
-foreach ($certificate in $certificates) {
+foreach ($case in $certificateCases | Sort-Object @{ Expression = { $_.Role -ne 'Authentication' } }) {
+    $certificate = $case.Certificate
+    $pinDescription = if ($case.Role -eq 'Authentication') {
+        'PIN1 (4-12 digits)'
+    } else {
+        'PIN2 (6-12 digits)'
+    }
+    Write-Host "Testing $($case.Role) certificate; Windows will request $pinDescription."
+
     $rsaPrivate = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
     $rsaPublic = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPublicKey($certificate)
     if ($rsaPrivate -and $rsaPublic) {
@@ -39,7 +76,7 @@ foreach ($certificate in $certificates) {
                 if (-not $verified) {
                     throw "$paddingName signature verification failed."
                 }
-                Write-Host "$paddingName sign and verify passed ($($signature.Length) bytes)."
+                Write-Host "$($case.Role) $paddingName sign and verify passed ($($signature.Length) bytes)."
             }
             $testedKeys += 1
         } finally {
@@ -65,7 +102,7 @@ foreach ($certificate in $certificates) {
             if (-not $verified) {
                 throw 'ECDSA signature verification failed.'
             }
-            Write-Host "ECDSA sign and verify passed ($($signature.Length) bytes)."
+            Write-Host "$($case.Role) ECDSA sign and verify passed ($($signature.Length) bytes)."
             $testedKeys += 1
         } finally {
             $ecPrivate.Dispose()

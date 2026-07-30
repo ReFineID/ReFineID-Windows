@@ -43,10 +43,11 @@ function Set-CardRegistration(
     New-ItemProperty -Path $key -Name ATRMask -PropertyType Binary -Value $AtrMask -Force | Out-Null
     New-ItemProperty -Path $key -Name 'Crypto Provider' -PropertyType String `
         -Value 'Microsoft Base Smart Card Crypto Provider' -Force | Out-Null
+    New-ItemProperty -Path $key -Name 'Smart Card Key Storage Provider' `
+        -PropertyType String -Value 'Microsoft Smart Card Key Storage Provider' `
+        -Force | Out-Null
     New-ItemProperty -Path $key -Name '80000001' -PropertyType String `
         -Value 'refineid_minidriver.dll' -Force | Out-Null
-    Remove-ItemProperty -LiteralPath $key -Name 'Smart Card Key Storage Provider' `
-        -ErrorAction SilentlyContinue
 }
 
 Assert-Administrator

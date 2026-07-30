@@ -125,7 +125,7 @@ use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
 use refineid_lib_core::pin_cache::PinSafetyCache;
 #[cfg(windows)]
-use refineid_lib_core::pin_retry_risk::pin1_cache_counters_are_pristine;
+use refineid_lib_core::pin_retry_risk::pin1_status_permits_consumer_authentication;
 #[cfg(windows)]
 use refineid_lib_core::pkcs15::{CertSlot, Pkcs15Ops};
 #[cfg(windows)]
@@ -146,17 +146,13 @@ fn live_token_serial(tx: &mut WinScardTransport) -> Result<TokenSerial, DWORD> {
 }
 
 #[cfg(windows)]
-fn live_pin1_cache_counters_are_pristine(tx: &mut WinScardTransport) -> Result<bool, DWORD> {
+fn live_pin1_authentication_is_permitted(tx: &mut WinScardTransport) -> Result<bool, DWORD> {
     tx.select_pkcs15_application()
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
     let pin1 = tx
         .pin_status(PinSlot::Pin1)
         .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    let pin2 = tx
-        .pin_status(PinSlot::Pin2)
-        .map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    let puk = tx.puk_status().map_err(|_error| SCARD_F_INTERNAL_ERROR)?;
-    Ok(pin1_cache_counters_are_pristine(pin1, pin2, puk))
+    Ok(pin1_status_permits_consumer_authentication(pin1))
 }
 
 #[cfg(windows)]
@@ -546,9 +542,9 @@ fn reverify_cached_pin(
             return Some(error);
         }
     };
-    if !matches!(live_pin1_cache_counters_are_pristine(tx), Ok(true)) {
+    if !matches!(live_pin1_authentication_is_permitted(tx), Ok(true)) {
         clear_pin_state(pin_safety, pin1_authenticated, pin2_authenticated);
-        Log::dbg("reverify_cached_pin: PIN1, PIN2, and PUK counters are not all five");
+        Log::dbg("reverify_cached_pin: PIN1 retry floor is below three or unreadable");
         return Some(SCARD_W_WRONG_CHV);
     }
     let slot = PinSlot::Pin1;
@@ -1458,7 +1454,7 @@ unsafe extern "system" fn CardAuthenticatePin(
         Err(error) => return error,
     };
     let pin1_cache_allowed =
-        slot != PinSlot::Pin1 || matches!(live_pin1_cache_counters_are_pristine(&mut tx), Ok(true));
+        slot != PinSlot::Pin1 || matches!(live_pin1_authentication_is_permitted(&mut tx), Ok(true));
     if ctx.pin_safety.is_rejected(&serial, slot, &pin) {
         return SCARD_W_WRONG_CHV;
     }
@@ -2313,7 +2309,7 @@ unsafe extern "system" fn CardAuthenticateEx(
         Err(error) => return error,
     };
     let pin1_cache_allowed =
-        slot != PinSlot::Pin1 || matches!(live_pin1_cache_counters_are_pristine(&mut tx), Ok(true));
+        slot != PinSlot::Pin1 || matches!(live_pin1_authentication_is_permitted(&mut tx), Ok(true));
     if ctx.pin_safety.is_rejected(&serial, slot, &pin) {
         return SCARD_W_WRONG_CHV;
     }
