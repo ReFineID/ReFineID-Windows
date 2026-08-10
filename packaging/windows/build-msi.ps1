@@ -21,15 +21,31 @@
     architecture rather than a single universal installer. Each package
     carries the matching release build of the Card Module DLL.
 
-    The output is unsigned. Signing is a separate, later step; an unsigned
-    package installs correctly but presents an unknown-publisher prompt.
+    Signing is optional. Without -CertificateThumbprint the output is
+    unsigned. With a self-signed certificate the output carries a verifiable
+    author identity and tamper-evidence, but the chain does not validate on
+    a machine that has not chosen to trust that certificate; Windows still
+    reports an unknown publisher there. Only a certificate from a CA in the
+    Microsoft Trusted Root Program removes that prompt for everyone.
+
+    .EXAMPLE
+    .\build-msi.ps1 -CertificateThumbprint (Get-ChildItem Cert:\CurrentUser\My |
+        Where-Object Subject -eq 'CN=Petri Koistinen').Thumbprint
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('x64', 'arm64')]
     [string[]]$Architecture = @('x64', 'arm64'),
 
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+
+    # Thumbprint of a code-signing certificate in the current user's store.
+    [string]$CertificateThumbprint,
+
+    # RFC 3161 timestamp authority. A timestamped signature stays verifiable
+    # after the signing certificate expires, so this is worth keeping even
+    # for a self-signed identity.
+    [string]$TimestampUrl = 'http://timestamp.digicert.com'
 )
 
 Set-StrictMode -Version Latest
@@ -41,7 +57,53 @@ if (-not $OutputDirectory) {
 }
 
 if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
-    throw 'The WiX toolset is required. Install it with: dotnet tool install --global wix'
+    throw 'The WiX toolset is required. Install it with: dotnet tool install --global wix --version 5.*'
+}
+
+function Get-SignTool {
+    # Prefer the host architecture's build, then any other, newest SDK first.
+    $architectureName = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        'Arm64' { 'arm64' }
+        'X64'   { 'x64' }
+        default { 'x86' }
+    }
+    $roots = @(
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$architectureName\signtool.exe",
+        "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\*\signtool.exe")
+    foreach ($root in $roots) {
+        $found = Get-ChildItem $root -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($found) { return $found.FullName }
+    }
+    throw 'signtool.exe was not found. Install the Windows SDK signing tools.'
+}
+
+function Invoke-Signing([string]$SignTool, [string]$Path) {
+    # SHA-256 file digest and SHA-256 timestamp digest; SHA-1 is not
+    # acceptable for either on current Windows.
+    & $SignTool sign `
+        /fd SHA256 `
+        /td SHA256 `
+        /tr $TimestampUrl `
+        /sha1 $CertificateThumbprint `
+        $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "signtool failed for '$Path'."
+    }
+}
+
+$signTool = $null
+if ($CertificateThumbprint) {
+    $certificate = Get-ChildItem "Cert:\CurrentUser\My\$CertificateThumbprint" -ErrorAction SilentlyContinue
+    if (-not $certificate) {
+        throw "No certificate with thumbprint '$CertificateThumbprint' in Cert:\CurrentUser\My."
+    }
+    if (-not $certificate.HasPrivateKey) {
+        throw 'The selected certificate has no private key.'
+    }
+    $signTool = Get-SignTool
+    Write-Host "Signing as: $($certificate.Subject)"
 }
 
 # The MSI ProductVersion field is numeric, so take the three CalVer
@@ -72,6 +134,12 @@ foreach ($arch in $Architecture) {
         throw "Expected the built Card Module at '$dll'."
     }
 
+    # Sign the DLL before packaging so the MSI carries the signed image.
+    # Signing the package afterwards would leave the loaded binary bare.
+    if ($signTool) {
+        Invoke-Signing $signTool $dll
+    }
+
     $msi = Join-Path $OutputDirectory "ReFineID.CardDriver-$productVersion-$arch.msi"
     Write-Host "Packaging $msi"
     & wix build `
@@ -83,7 +151,15 @@ foreach ($arch in $Architecture) {
     if ($LASTEXITCODE -ne 0) {
         throw "wix build failed for $arch."
     }
+
+    if ($signTool) {
+        Invoke-Signing $signTool $msi
+    }
 }
 
 Write-Host ''
-Write-Host "Unsigned packages are in $OutputDirectory"
+if ($signTool) {
+    Write-Host "Signed packages are in $OutputDirectory"
+} else {
+    Write-Host "Unsigned packages are in $OutputDirectory"
+}
