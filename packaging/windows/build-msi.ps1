@@ -60,13 +60,22 @@ if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $repositoryRoot 'artifacts\msi'
 }
 
-function Get-SignTool {
-    # Prefer the host architecture's build, then any other, newest SDK first.
-    $architectureName = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
-        'Arm64' { 'arm64' }
-        'X64'   { 'x64' }
+function Get-HostArchitecture {
+    # Windows PowerShell 5.1 runs emulated on ARM64, where both
+    # $env:PROCESSOR_ARCHITECTURE and RuntimeInformation::OSArchitecture
+    # report the emulated x64 rather than the real machine. Win32_Processor
+    # reports the hardware, so ask that instead.
+    $architecture = (Get-CimInstance Win32_Processor | Select-Object -First 1).Architecture
+    switch ([int]$architecture) {
+        12 { 'arm64' }
+        9  { 'x64' }
         default { 'x86' }
     }
+}
+
+function Get-SignTool {
+    # Prefer the host architecture's build, then any other, newest SDK first.
+    $architectureName = Get-HostArchitecture
     $roots = @(
         "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\$architectureName\signtool.exe",
         "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\*\signtool.exe")
