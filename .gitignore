@@ -16,3 +16,4 @@
 # Private signing material
 *.p12
 *.pfx
+/artifacts/

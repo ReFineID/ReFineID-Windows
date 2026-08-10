@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copyright 2026 Petri Koistinen
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      https://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    Driver-only package. It installs one Card Module DLL and the per-ATR
+    Calais registration Windows reads to bind that DLL to a FINEID card.
+    It deliberately carries no application, service, tray icon, updater,
+    or telemetry: the signing and card-management tools ship separately
+    because they need neither administrator rights nor this package's
+    release cadence.
+  -->
+  <Package
+      Name="ReFineID Card Driver"
+      Manufacturer="Petri Koistinen"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="DBD5521A-AA2C-45D1-B79C-8535E2C262A5"
+      Scope="perMachine"
+      Compressed="yes"
+      InstallerVersion="500">
+
+    <SummaryInformation Description="Windows smart-card minidriver for FINEID cards" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+        Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      Windows Server has no inbox smart-card stack story worth supporting
+      here, and the driver targets client Windows 10/11 only.
+    -->
+    <Launch
+        Condition="Installed OR (VersionNT &gt;= 1000)"
+        Message="[ProductName] requires Windows 10 or later." />
+
+    <!--
+      System64Folder is the native system directory: System32 on x64 and
+      on ARM64. Base CSP loads the Card Module by bare file name from
+      there, so the name must match the "80000001" value below exactly.
+    -->
+    <StandardDirectory Id="System64Folder">
+      <Component Id="MinidriverDll" Bitness="always64" Guid="*">
+        <File
+            Id="refineid_minidriver.dll"
+            Name="refineid_minidriver.dll"
+            Source="$(var.MinidriverPath)"
+            KeyPath="yes" />
+
+        <!--
+          SCardSvr caches the Calais card database, so it must be
+          restarted for a new or removed registration to take effect.
+          It is demand-start, so stopping it on uninstall is enough.
+        -->
+        <ServiceControl
+            Id="RestartSmartCardService"
+            Name="SCardSvr"
+            Stop="both"
+            Start="install"
+            Wait="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!--
+      One Calais key per supported ATR. "80000001" is the Card Module
+      value name Windows reads; the two provider strings point Base CSP
+      and the Smart Card KSP at Microsoft's own upper layers, which is
+      the whole reason a minidriver exists rather than a custom CSP.
+
+      ATRMask marks which ATR bytes must match. The v4.0 mask zeroes
+      bytes 13-17, which carry card-individual data.
+    -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Component Id="CalaisRegistration" Bitness="always64" Guid="*">
+        <RegistryKey
+            Root="HKLM"
+            Key="SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v3.1">
+          <RegistryValue Type="binary" Name="ATR"
+              Value="3b7f9600008031b865b08504021b1200f6829000" />
+          <RegistryValue Type="binary" Name="ATRMask"
+              Value="ffffffffffffffffffffffffffffffffffffffff" />
+          <RegistryValue Type="string" Name="Crypto Provider"
+              Value="Microsoft Base Smart Card Crypto Provider" />
+          <RegistryValue Type="string" Name="Smart Card Key Storage Provider"
+              Value="Microsoft Smart Card Key Storage Provider" />
+          <RegistryValue Type="string" Name="80000001"
+              Value="refineid_minidriver.dll" />
+        </RegistryKey>
+
+        <RegistryKey
+            Root="HKLM"
+            Key="SOFTWARE\Microsoft\Cryptography\Calais\SmartCards\FINEID-S4-1-v4.0">
+          <RegistryValue Type="binary" Name="ATR"
+              Value="3b7f9600008031b865b085050000000000829000" />
+          <RegistryValue Type="binary" Name="ATRMask"
+              Value="ffffffffffffffffffffffff0000000000ffffff" />
+          <RegistryValue Type="string" Name="Crypto Provider"
+              Value="Microsoft Base Smart Card Crypto Provider" />
+          <RegistryValue Type="string" Name="Smart Card Key Storage Provider"
+              Value="Microsoft Smart Card Key Storage Provider" />
+          <RegistryValue Type="string" Name="80000001"
+              Value="refineid_minidriver.dll" />
+        </RegistryKey>
+
+        <RegistryValue
+            Root="HKLM"
+            Key="SOFTWARE\ReFineID\CardDriver"
+            Name="InstalledVersion"
+            Type="string"
+            Value="$(var.ProductVersion)"
+            KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="ReFineID Card Driver" Level="1">
+      <ComponentRef Id="MinidriverDll" />
+      <ComponentRef Id="CalaisRegistration" />
+    </Feature>
+
+  </Package>
+</Wix>
