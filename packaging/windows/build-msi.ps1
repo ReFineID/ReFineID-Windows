@@ -33,8 +33,13 @@
     Microsoft Trusted Root Program removes that prompt for everyone.
 
     .EXAMPLE
-    .\build-msi.ps1 -CertificateThumbprint (Get-ChildItem Cert:\CurrentUser\My |
-        Where-Object Subject -eq 'CN=Petri Koistinen').Thumbprint
+    .\build-msi.ps1
+
+    .EXAMPLE
+    # -CodeSigningCert selects by extended key usage, so it finds the right
+    # certificate without needing to match a subject name.
+    Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert
+    .\build-msi.ps1 -CertificateThumbprint <thumbprint>
 #>
 [CmdletBinding()]
 param(
