@@ -17,3 +17,7 @@
 *.p12
 *.pfx
 /artifacts/
+
+# makecab scratch, should it ever escape the build directory again
+/setup.inf
+/setup.rpt

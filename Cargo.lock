@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-card-manager-core"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "hex",
  "refineid-lib-core",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-core"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "aes",
  "cbc",
@@ -516,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-lib-pcsc"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "pcsc",
  "refineid-lib-core",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-minidriver"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "refineid-lib-core",
  "refineid-windows-credential-store",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-msi"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "sha1",
  "windows-sys",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-settings-ffi"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "refineid-card-manager-core",
  "refineid-lib-core",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "refineid-windows-credential-store"
-version = "26.7.30"
+version = "26.8.10"
 dependencies = [
  "refineid-lib-core",
  "windows-sys",

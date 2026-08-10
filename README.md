@@ -23,7 +23,7 @@ used. Windows requires a small `unsafe extern "system"` boundary for the Card
 Module function table and caller-owned pointers; the protocol, parsing, PIN
 handling, and cryptographic state machines remain safe Rust.
 
-Status: alpha. The imported reference implementation has been hardware-tested
+Status: beta. The imported reference implementation has been hardware-tested
 with FINEID S4-1 v3.1 and v4.0 cards, including:
 
 - authentication and qualified-signature certificate enumeration;
@@ -64,7 +64,7 @@ path:
 The FINEID S4-1 v4.0 PACE and protected-read sequence has passed separately with
 an ACS ACR1581 PICC reader. The new Windows Credential Manager-to-minidriver
 handoff still needs real-reader acceptance before contactless browser use can be
-called supported. Contact mode remains the supported alpha path meanwhile.
+called supported. Contact mode remains the supported path meanwhile.
 
 ### ReFineID Settings
 

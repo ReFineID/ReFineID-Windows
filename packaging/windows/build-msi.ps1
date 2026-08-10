@@ -115,13 +115,16 @@ if ($CertificateThumbprint) {
     Write-Host "Signing as: $($certificate.Subject)"
 }
 
-# The version comes from the workspace manifest, and refineid-msi reads the
-# same value from its own package metadata.
-$manifest = Get-Content (Join-Path $repositoryRoot 'Cargo.toml') -Raw
-if ($manifest -notmatch '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
-    throw 'Could not read the workspace version from Cargo.toml.'
+# VERSION is canonical. Cargo.toml carries only the three-component SemVer
+# projection, which would silently drop the within-day bucket.
+$versionFile = Join-Path $repositoryRoot 'VERSION'
+if (-not (Test-Path -LiteralPath $versionFile)) {
+    throw "No VERSION file. Run script\version-stamp.ps1 first."
 }
-$productVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+$productVersion = (Get-Content $versionFile -Raw).Trim()
+if ($productVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+    throw "VERSION must be YY.M.D.B, found '$productVersion'."
+}
 
 $rustTargets = @{
     'x64'   = 'x86_64-pc-windows-msvc'
@@ -154,7 +157,8 @@ foreach ($arch in $Architecture) {
     & cargo run --quiet --package refineid-msi -- `
         --architecture $arch `
         --minidriver $dll `
-        --output $msi
+        --output $msi `
+        --version $productVersion
     if ($LASTEXITCODE -ne 0) {
         throw "refineid-msi failed for $arch."
     }

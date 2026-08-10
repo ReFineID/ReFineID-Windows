@@ -94,10 +94,12 @@ mod windows_main {
         architecture: Architecture,
         minidriver: PathBuf,
         output: PathBuf,
+        version: Version,
     }
 
     fn usage() -> String {
-        "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> --output <path>"
+        "usage: refineid-msi --architecture <x64|arm64> --minidriver <path> \
+         --output <path> --version <YY.M.D.B>"
             .to_owned()
     }
 
@@ -105,6 +107,7 @@ mod windows_main {
         let mut architecture = None;
         let mut minidriver = None;
         let mut output = None;
+        let mut version = None;
         let mut arguments = std::env::args().skip(1);
         while let Some(flag) = arguments.next() {
             let mut value = || {
@@ -122,6 +125,9 @@ mod windows_main {
                 }
                 "--minidriver" => minidriver = Some(PathBuf::from(value()?)),
                 "--output" => output = Some(PathBuf::from(value()?)),
+                "--version" => {
+                    version = Some(Version::parse(&value()?).map_err(|error| error.to_string())?);
+                }
                 "--help" | "-h" => return Err(usage()),
                 other => return Err(format!("unknown argument '{other}'\n{}", usage())),
             }
@@ -130,25 +136,13 @@ mod windows_main {
             architecture: architecture.ok_or_else(|| format!("--architecture\n{}", usage()))?,
             minidriver: minidriver.ok_or_else(|| format!("--minidriver\n{}", usage()))?,
             output: output.ok_or_else(|| format!("--output\n{}", usage()))?,
-        })
-    }
-
-    fn crate_version() -> Result<Version, String> {
-        let text = env!("CARGO_PKG_VERSION");
-        let parts: Vec<&str> = text.split('.').collect();
-        let [major, minor, build] = parts.as_slice() else {
-            return Err(format!("the crate version '{text}' is not three parts"));
-        };
-        Ok(Version {
-            major: major.parse().map_err(|_| "major version above 255")?,
-            minor: minor.parse().map_err(|_| "minor version above 255")?,
-            build: build.parse().map_err(|_| "build version above 65535")?,
+            version: version.ok_or_else(|| format!("--version\n{}", usage()))?,
         })
     }
 
     pub fn run() -> Result<(), String> {
         let arguments = parse_arguments()?;
-        let version = crate_version()?;
+        let version = arguments.version;
         let upgrade_code = Guid::parse(UPGRADE_CODE).map_err(|error| error.to_string())?;
 
         let keys: Vec<String> = CARDS

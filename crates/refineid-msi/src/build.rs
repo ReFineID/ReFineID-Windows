@@ -68,21 +68,107 @@ impl Architecture {
     }
 }
 
-/// A three-part product version.
+/// The project's `YY.M.D.B` calendar version.
 ///
-/// Windows Installer compares only these three fields, so a fourth would be
-/// silently ignored during upgrade detection.
+/// `B` is a within-day ten-minute bucket, `hour * 10 + minute / 10`, so it
+/// ranges 0 to 235.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
-    /// Major version, at most 255.
+    /// Years since 2000.
+    pub year: u8,
+    /// Month, 1 to 12.
+    pub month: u8,
+    /// Day of month, 1 to 31.
+    pub day: u8,
+    /// Ten-minute bucket within the day, 0 to 235.
+    pub bucket: u16,
+}
+
+/// A version string was not a usable `YY.M.D.B`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionParseError;
+
+impl fmt::Display for VersionParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(
+            "expected YY.M.D.B with month 1-12, day 1-31, and bucket 0-235 \
+             (hour * 10 + minute / 10)",
+        )
+    }
+}
+
+impl std::error::Error for VersionParseError {}
+
+impl Version {
+    /// Parses the canonical four-component form, as stored in `VERSION`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text is not four numbers in range.
+    pub fn parse(text: &str) -> Result<Self, VersionParseError> {
+        let parts: Vec<&str> = text.trim().split('.').collect();
+        let [year, month, day, bucket] = parts.as_slice() else {
+            return Err(VersionParseError);
+        };
+        let version = Self {
+            year: year.parse().map_err(|_| VersionParseError)?,
+            month: month.parse().map_err(|_| VersionParseError)?,
+            day: day.parse().map_err(|_| VersionParseError)?,
+            bucket: bucket.parse().map_err(|_| VersionParseError)?,
+        };
+        if !(1..=12).contains(&version.month)
+            || !(1..=31).contains(&version.day)
+            || version.bucket > MAXIMUM_BUCKET
+        {
+            return Err(VersionParseError);
+        }
+        Ok(version)
+    }
+
+    /// Projects onto the three fields Windows Installer actually compares.
+    ///
+    /// `ProductVersion` has no fourth field, and a fourth is ignored during
+    /// upgrade detection, so the day and the bucket are folded into the
+    /// build field as `day * 1000 + bucket`. That keeps the printed form
+    /// readable, stays inside the 65535 limit at its largest value of
+    /// 31235, and preserves ordering: within a month the build field rises
+    /// with the day and then the time, and across a month or year boundary
+    /// the higher fields carry the comparison.
+    #[must_use]
+    pub const fn product_version(self) -> ProductVersion {
+        ProductVersion {
+            major: self.year,
+            minor: self.month,
+            build: self.day as u16 * 1000 + self.bucket,
+        }
+    }
+}
+
+/// The largest ten-minute bucket in a day, at 23:50.
+const MAXIMUM_BUCKET: u16 = 235;
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}.{}",
+            self.year, self.month, self.day, self.bucket
+        )
+    }
+}
+
+/// The three-field version written into the package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ProductVersion {
+    /// Major field.
     pub major: u8,
-    /// Minor version, at most 255.
+    /// Minor field.
     pub minor: u8,
-    /// Build number.
+    /// Build field, carrying both the day and the bucket.
     pub build: u16,
 }
 
-impl fmt::Display for Version {
+impl fmt::Display for ProductVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.build)
     }
@@ -314,7 +400,10 @@ pub fn build(package: &Package<'_>, output: &Path, scratch: &Path) -> Result<(),
         package.version,
         package.architecture.name()
     ));
-    let version = package.version.to_string();
+    // The database carries the three-field projection, because that is what
+    // Windows Installer compares; the full YY.M.D.B stays in the derived
+    // identifiers and the file name so a rebuilt package is still distinct.
+    let version = package.version.product_version().to_string();
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
@@ -652,7 +741,7 @@ fn write_sequences(database: &Database) -> Result<(), BuildError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RegistryData, encode_registry, short_name};
+    use super::{RegistryData, Version, encode_registry, short_name};
 
     #[test]
     fn binary_registry_data_uses_the_hexadecimal_prefix() {
@@ -669,6 +758,76 @@ mod tests {
     #[test]
     fn empty_binary_data_still_carries_the_prefix() {
         assert_eq!(encode_registry(RegistryData::Binary(&[])), "#x");
+    }
+
+    #[test]
+    fn parses_the_canonical_four_component_form() {
+        let version = Version::parse("26.8.7.153").expect("parses");
+        assert_eq!(
+            version,
+            Version {
+                year: 26,
+                month: 8,
+                day: 7,
+                bucket: 153,
+            }
+        );
+        assert_eq!(version.to_string(), "26.8.7.153");
+    }
+
+    #[test]
+    fn rejects_out_of_range_components() {
+        for text in [
+            "26.8.7",     // three components
+            "26.13.7.0",  // month
+            "26.8.32.0",  // day
+            "26.8.7.236", // bucket above 23:50
+            "26.8.7.0.1", // five components
+            "twentysix.8.7.0",
+        ] {
+            assert!(Version::parse(text).is_err(), "{text} must be rejected");
+        }
+    }
+
+    #[test]
+    fn the_projection_folds_the_day_and_bucket() {
+        let version = Version::parse("26.8.7.153").expect("parses");
+        assert_eq!(version.product_version().to_string(), "26.8.7153");
+    }
+
+    #[test]
+    fn the_projection_stays_inside_the_installer_limit() {
+        // The largest value the fold can produce: day 31 at 23:50. Windows
+        // Installer caps the build field at 65535, so this leaves headroom
+        // and the u16 arithmetic in the fold cannot wrap.
+        let latest = Version::parse("99.12.31.235").expect("parses");
+        assert_eq!(latest.product_version().build, 31_235);
+    }
+
+    #[test]
+    fn the_projection_preserves_ordering() {
+        let ordered = [
+            "26.8.7.0",
+            "26.8.7.153",
+            "26.8.7.235",
+            "26.8.8.0",
+            "26.8.31.235",
+            "26.9.1.0",
+            "26.12.31.235",
+            "27.1.1.0",
+        ];
+        let projected: Vec<_> = ordered
+            .iter()
+            .map(|text| Version::parse(text).expect("parses").product_version())
+            .collect();
+        for pair in projected.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{:?} must precede {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]

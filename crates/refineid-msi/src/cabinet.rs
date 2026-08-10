@@ -94,6 +94,19 @@ pub fn build(
     // Writing into a String cannot fail, so the results carry no information.
     let _ = writeln!(directives, ".Set CabinetNameTemplate={cabinet_name}");
     let _ = writeln!(directives, ".Set DiskDirectory1={}", directory.display());
+    // makecab writes its manifest and report to the current directory
+    // unless told otherwise, which drops build scratch wherever the build
+    // happened to be invoked from. Keep them inside the scratch directory.
+    let _ = writeln!(
+        directives,
+        ".Set InfFileName={}",
+        directory.join("setup.inf").display()
+    );
+    let _ = writeln!(
+        directives,
+        ".Set RptFileName={}",
+        directory.join("setup.rpt").display()
+    );
     for member in members {
         let _ = writeln!(directives, "\"{}\" {}", member.source.display(), member.key);
     }
