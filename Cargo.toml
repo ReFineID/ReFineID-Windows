@@ -5,6 +5,7 @@ members = [
     "crates/refineid-lib-core",
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
+    "crates/refineid-msi",
     "crates/refineid-settings-ffi",
     "crates/refineid-windows-credential-store",
 ]
@@ -43,6 +44,7 @@ subtle = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_System_ApplicationInstallationAndServicing",
     "Win32_Security_Credentials",
 ] }
 

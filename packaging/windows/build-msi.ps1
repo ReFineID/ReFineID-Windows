@@ -17,9 +17,13 @@
     Builds the driver-only MSI for each requested architecture.
 
     .DESCRIPTION
+    Packaging needs nothing beyond Windows itself: refineid-msi writes the
+    installer database through the Windows Installer API, and the payload
+    cabinet comes from makecab.exe. There is no third-party packaging
+    toolchain to install, license, or keep current.
+
     MSI packages are architecture-specific, so this produces one file per
-    architecture rather than a single universal installer. Each package
-    carries the matching release build of the Card Module DLL.
+    architecture rather than a single universal installer.
 
     Signing is optional. Without -CertificateThumbprint the output is
     unsigned. With a self-signed certificate the output carries a verifiable
@@ -54,10 +58,6 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $repositoryRoot 'artifacts\msi'
-}
-
-if (-not (Get-Command wix -ErrorAction SilentlyContinue)) {
-    throw 'The WiX toolset is required. Install it with: dotnet tool install --global wix --version 5.*'
 }
 
 function Get-SignTool {
@@ -106,8 +106,8 @@ if ($CertificateThumbprint) {
     Write-Host "Signing as: $($certificate.Subject)"
 }
 
-# The MSI ProductVersion field is numeric, so take the three CalVer
-# components from the workspace manifest rather than any suffix.
+# The version comes from the workspace manifest, and refineid-msi reads the
+# same value from its own package metadata.
 $manifest = Get-Content (Join-Path $repositoryRoot 'Cargo.toml') -Raw
 if ($manifest -notmatch '(?m)^version\s*=\s*"(\d+)\.(\d+)\.(\d+)"') {
     throw 'Could not read the workspace version from Cargo.toml.'
@@ -142,14 +142,12 @@ foreach ($arch in $Architecture) {
 
     $msi = Join-Path $OutputDirectory "ReFineID.CardDriver-$productVersion-$arch.msi"
     Write-Host "Packaging $msi"
-    & wix build `
-        (Join-Path $PSScriptRoot 'ReFineID.CardDriver.wxs') `
-        -arch $arch `
-        -define "ProductVersion=$productVersion" `
-        -define "MinidriverPath=$dll" `
-        -out $msi
+    & cargo run --quiet --package refineid-msi -- `
+        --architecture $arch `
+        --minidriver $dll `
+        --output $msi
     if ($LASTEXITCODE -ne 0) {
-        throw "wix build failed for $arch."
+        throw "refineid-msi failed for $arch."
     }
 
     if ($signTool) {

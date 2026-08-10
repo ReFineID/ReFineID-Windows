@@ -531,6 +531,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-msi"
+version = "26.7.30"
+dependencies = [
+ "sha1",
+ "windows-sys",
+]
+
+[[package]]
 name = "refineid-settings-ffi"
 version = "26.7.30"
 dependencies = [
