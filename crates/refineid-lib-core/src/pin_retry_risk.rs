@@ -50,48 +50,36 @@ impl PinRetryRisk {
         }
     }
 
-    /// PKCS #11 permits PIN1 only at five or four attempts.
+    /// The one blocked band is one or two attempts remaining. Every other
+    /// state passes: pristine, disturbed, security-incident, and even
+    /// already-locked. Refusing exactly `{1, 2}` is what keeps this software
+    /// from ever spending the next-to-last or last attempt, so a lockout is
+    /// never its doing; a zero-attempt card is let through to surface its
+    /// locked state or route to an unblock, with nothing left to protect.
     #[must_use]
     pub const fn permits_pkcs11(self) -> bool {
-        matches!(
-            self,
-            Self::NormalOperatingConditions | Self::DisturbanceDetected
-        )
+        !matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
     }
 
-    /// Ordinary graphical and system interfaces permit attempts down to three.
+    /// Ordinary graphical and system interfaces block the same one-or-two
+    /// band and pass everything else. See [`Self::permits_pkcs11`].
     #[must_use]
     pub const fn permits_consumer(self) -> bool {
-        matches!(
-            self,
-            Self::NormalOperatingConditions
-                | Self::DisturbanceDetected
-                | Self::SecurityIncidentDeclared
-        )
+        !matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
     }
 
-    /// Reusable PIN1 caching requires a pristine five-attempt state.
+    /// Reusable PIN1 caching requires a pristine five-attempt state. This is a
+    /// separate, stricter gate for *arming* the cache, not the operate floor.
     #[must_use]
     pub const fn permits_reusable_cache(self) -> bool {
         matches!(self, Self::NormalOperatingConditions)
     }
 
-    /// Counts one and two require the CLI-only expert confirmation capability.
-    #[must_use]
-    pub const fn requires_expert_confirmation(self) -> bool {
-        matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
-    }
-
-    /// SCS must terminate before a PIN operation at three or fewer attempts.
+    /// SCS terminates rather than operate in the blocked one-or-two band,
+    /// matching the repo-wide floor.
     #[must_use]
     pub const fn requires_scs_shutdown(self) -> bool {
-        matches!(
-            self,
-            Self::SecurityIncidentDeclared
-                | Self::CriticalThreatLevel
-                | Self::LockdownImminent
-                | Self::DefencesFallen
-        )
+        matches!(self, Self::CriticalThreatLevel | Self::LockdownImminent)
     }
 }
 
@@ -114,6 +102,23 @@ pub const fn pin1_status_permits_consumer_authentication(pin1: PinStatus) -> boo
     }
 }
 
+/// Whether PIN1 may be retained for reusable authentication.
+///
+/// Only PIN1 is relevant. Four remaining attempts may still permit a
+/// one-shot operation in adapters with an explicit retry floor, but not a
+/// reusable cache entry.
+#[must_use]
+pub const fn pin1_status_permits_reusable_cache(pin1: PinStatus) -> bool {
+    matches!(
+        pin1,
+        PinStatus::Remaining(retries)
+            if matches!(
+                PinRetryRisk::from_retries(retries),
+                Some(risk) if risk.permits_reusable_cache()
+            )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,16 +139,40 @@ mod tests {
     }
 
     #[test]
-    fn consumer_floors_follow_the_risk_ladder() {
+    fn floors_block_only_one_and_two_attempts() {
+        // Reusable caching stays stricter: a pristine five is required to arm.
         assert!(PinRetryRisk::NormalOperatingConditions.permits_reusable_cache());
-        assert!(PinRetryRisk::DisturbanceDetected.permits_pkcs11());
-        assert!(!PinRetryRisk::SecurityIncidentDeclared.permits_pkcs11());
-        assert!(PinRetryRisk::SecurityIncidentDeclared.permits_consumer());
-        assert!(!PinRetryRisk::CriticalThreatLevel.permits_consumer());
-        assert!(PinRetryRisk::LockdownImminent.requires_expert_confirmation());
-        assert!(!PinRetryRisk::DefencesFallen.requires_expert_confirmation());
-        assert!(!PinRetryRisk::DisturbanceDetected.requires_scs_shutdown());
-        assert!(PinRetryRisk::SecurityIncidentDeclared.requires_scs_shutdown());
+        assert!(!PinRetryRisk::DisturbanceDetected.permits_reusable_cache());
+
+        // The operate floor passes every state except one or two attempts,
+        // including an already-locked card.
+        for permitted in [
+            PinRetryRisk::NormalOperatingConditions,
+            PinRetryRisk::DisturbanceDetected,
+            PinRetryRisk::SecurityIncidentDeclared,
+            PinRetryRisk::DefencesFallen,
+        ] {
+            assert!(permitted.permits_pkcs11(), "{permitted:?} permits pkcs11");
+            assert!(
+                permitted.permits_consumer(),
+                "{permitted:?} permits consumer"
+            );
+            assert!(
+                !permitted.requires_scs_shutdown(),
+                "{permitted:?} keeps SCS up"
+            );
+        }
+        for blocked in [
+            PinRetryRisk::CriticalThreatLevel,
+            PinRetryRisk::LockdownImminent,
+        ] {
+            assert!(!blocked.permits_pkcs11(), "{blocked:?} blocks pkcs11");
+            assert!(!blocked.permits_consumer(), "{blocked:?} blocks consumer");
+            assert!(
+                blocked.requires_scs_shutdown(),
+                "{blocked:?} shuts SCS down"
+            );
+        }
     }
 
     #[test]
@@ -158,7 +187,9 @@ mod tests {
         assert!(pin1_status_permits_consumer_authentication(remaining(3)));
         assert!(!pin1_status_permits_consumer_authentication(remaining(2)));
         assert!(!pin1_status_permits_consumer_authentication(remaining(1)));
-        assert!(!pin1_status_permits_consumer_authentication(remaining(0)));
+        // Zero attempts passes the floor -- nothing left to protect; the card
+        // surfaces its locked state or a recovery routes to an unblock.
+        assert!(pin1_status_permits_consumer_authentication(remaining(0)));
         assert!(pin1_status_permits_consumer_authentication(
             PinStatus::Verified
         ));
@@ -171,5 +202,18 @@ mod tests {
         assert!(!pin1_status_permits_consumer_authentication(
             PinStatus::Other(0x63_00)
         ));
+    }
+
+    #[test]
+    fn reusable_pin1_cache_requires_only_pin1_at_five() {
+        let remaining = |count| {
+            PinStatus::Remaining(
+                PinRetries::from_nibble(count).expect("test retry count fits one nibble"),
+            )
+        };
+        assert!(pin1_status_permits_reusable_cache(remaining(5)));
+        assert!(!pin1_status_permits_reusable_cache(remaining(4)));
+        assert!(!pin1_status_permits_reusable_cache(remaining(3)));
+        assert!(!pin1_status_permits_reusable_cache(PinStatus::Verified));
     }
 }
