@@ -125,7 +125,7 @@ use refineid_lib_core::pace::run_pace_with_can;
 #[cfg(windows)]
 use refineid_lib_core::pin::PinBytes;
 #[cfg(windows)]
-use refineid_lib_core::pin_cache::PinSafetyCache;
+use refineid_lib_core::pin_cache::{PIN1_CACHE_LIFETIME, PIN2_CACHE_LIFETIME, PinSafetyCache};
 #[cfg(windows)]
 use refineid_lib_core::pin_retry_risk::pin1_status_permits_consumer_authentication;
 #[cfg(windows)]
@@ -823,7 +823,7 @@ fn pin_unblock_permission(pin_id: DWORD) -> DWORD {
 #[cfg(windows)]
 fn pin_cache_policy(pin_id: DWORD) -> DWORD {
     match pin_id {
-        PIN_ID_AUTH => PIN_CACHE_TIMED,
+        PIN_ID_AUTH | PIN_ID_QUALIFIED_SIG => PIN_CACHE_TIMED,
         _ => PIN_CACHE_NONE,
     }
 }
@@ -832,11 +832,39 @@ fn pin_cache_policy(pin_id: DWORD) -> DWORD {
 fn pin_cache_policy_info(pin_id: DWORD) -> DWORD {
     /// Microsoft defines `dwPinCachePolicyInfo` in seconds for
     /// `PIN_CACHE_TIMED`.
-    const PIN1_CACHE_TIMEOUT_SECONDS: DWORD = 5 * 60;
+    ///
+    /// Derived from the shared policy rather than restated, because on
+    /// Windows this declaration is what actually governs prompting: Base
+    /// CSP/KSP draws the PIN dialog and runs its own cache from these
+    /// values, so a number that drifted from the core would silently
+    /// change behaviour on this platform alone.
+    const PIN1_CACHE_TIMEOUT_SECONDS: DWORD = cache_timeout_seconds(PIN1_CACHE_LIFETIME);
+    const PIN2_CACHE_TIMEOUT_SECONDS: DWORD = cache_timeout_seconds(PIN2_CACHE_LIFETIME);
     match pin_id {
         PIN_ID_AUTH => PIN1_CACHE_TIMEOUT_SECONDS,
+        PIN_ID_QUALIFIED_SIG => PIN2_CACHE_TIMEOUT_SECONDS,
         _ => 0,
     }
+}
+
+/// Converts a shared policy lifetime to the whole seconds Windows wants.
+///
+/// The assertion runs at compile time, so a future lifetime too large for
+/// the field fails the build instead of silently wrapping into a much
+/// shorter cache window than the policy intends.
+#[cfg(windows)]
+const fn cache_timeout_seconds(lifetime: core::time::Duration) -> DWORD {
+    let seconds = lifetime.as_secs();
+    assert!(
+        seconds <= DWORD::MAX as u64,
+        "a PIN cache lifetime must fit the Windows dwPinCachePolicyInfo field"
+    );
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the assertion above rejects any value that would truncate"
+    )]
+    let seconds = seconds as DWORD;
+    seconds
 }
 
 #[cfg(windows)]
