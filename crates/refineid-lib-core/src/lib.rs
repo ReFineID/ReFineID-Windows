@@ -116,6 +116,7 @@ pub mod revocation;
 pub mod rng;
 pub mod secure_messaging;
 pub mod sign;
+pub mod signing_session;
 pub mod text;
 pub mod transport;
 pub mod x509;
