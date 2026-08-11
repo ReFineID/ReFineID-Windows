@@ -14,7 +14,13 @@
 
 //! Process-local PIN retry protection.
 //!
-//! A successfully verified PIN1 may be retained for at most five minutes.
+//! A successfully verified PIN1 may be retained for at most fifteen minutes,
+//! refreshed on each use -- an idle window for an authentication session. A
+//! verified PIN2 may be retained for one minute measured from entry and never
+//! refreshed -- a bounded consent window that lets a signing batch run without
+//! prompting per document, yet cannot be kept alive indefinitely by a stream
+//! of signatures.
+//!
 //! A PIN1 or PIN2 value rejected by a card is remembered until process exit
 //! and refused locally thereafter, so software cannot burn another card retry
 //! with the same value. Rejected values are represented only by a fingerprint
@@ -32,10 +38,13 @@ use crate::auth::PinSlot;
 use crate::identity::TokenSerial;
 use crate::pin::PinBytes;
 
-/// Maximum lifetime of a positively cached PIN1.
-pub const PIN1_CACHE_LIFETIME: Duration = Duration::from_mins(5);
+/// Maximum lifetime of a positively cached PIN1, refreshed on each use.
+pub const PIN1_CACHE_LIFETIME: Duration = Duration::from_mins(15);
 /// Maximum staging time for a PIN1 that may be used for one operation only.
 const PIN1_ONE_SHOT_LIFETIME: Duration = Duration::from_secs(30);
+/// Maximum lifetime of a positively cached PIN2, measured from entry and
+/// never refreshed -- a bounded consent window for one signing batch.
+pub const PIN2_CACHE_LIFETIME: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Pin1Retention {
@@ -112,6 +121,52 @@ impl core::fmt::Debug for CheckedOutPin1 {
     }
 }
 
+/// A verified PIN2 held for the bounded consent window. Kept distinct from
+/// [`CachedPin1`] on purpose: PIN2's window is anchored at entry and is never
+/// refreshed by use, so a signing batch cannot extend it.
+struct CachedPin2 {
+    serial: TokenSerial,
+    pin: PinBytes,
+    entered_at: Instant,
+    generation: u64,
+}
+
+/// Destructively checked-out PIN2 state for one live card serial.
+///
+/// As with [`CheckedOutPin1`], dropping this destroys the PIN; it returns to
+/// the cache only through [`Self::restore_after_success`], after a definite
+/// card-side success, and only if no invalidation intervened. Restoring does
+/// *not* extend the window -- PIN2 expires a fixed [`PIN2_CACHE_LIFETIME`]
+/// after it was entered, however many signatures it served in between.
+pub struct CheckedOutPin2 {
+    entry: CachedPin2,
+}
+
+impl CheckedOutPin2 {
+    /// Borrow the PIN for the single signature associated with this checkout.
+    #[must_use]
+    pub const fn pin(&self) -> &PinBytes {
+        &self.entry.pin
+    }
+
+    /// Restore this entry after a definite card-side success, keeping its
+    /// original entry deadline. Concurrent or intervening invalidation wins.
+    pub fn restore_after_success(self, cache: &mut PinSafetyCache) {
+        if cache.generation_pin2 != self.entry.generation || cache.positive_pin2.is_some() {
+            return;
+        }
+        cache.positive_pin2 = Some(self.entry);
+    }
+}
+
+impl core::fmt::Debug for CheckedOutPin2 {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CheckedOutPin2")
+            .field("serial", &self.entry.serial)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Opaque keyed mark for one rejected PIN value.
 #[derive(Zeroize)]
 struct RejectedPinFingerprint([u8; 32]);
@@ -122,7 +177,11 @@ pub struct PinSafetyCache {
     #[zeroize(skip)]
     positive_pin1: Option<CachedPin1>,
     #[zeroize(skip)]
+    positive_pin2: Option<CachedPin2>,
+    #[zeroize(skip)]
     generation: u64,
+    #[zeroize(skip)]
+    generation_pin2: u64,
     fingerprint_key: [u8; 32],
     rejected_pin1: Vec<RejectedPinFingerprint>,
     rejected_pin2: Vec<RejectedPinFingerprint>,
@@ -137,7 +196,9 @@ impl PinSafetyCache {
     pub fn new() -> Result<Self, crate::rng::Failure> {
         Ok(Self {
             positive_pin1: None,
+            positive_pin2: None,
             generation: 0,
+            generation_pin2: 0,
             fingerprint_key: crate::rng::array()?,
             rejected_pin1: Vec::new(),
             rejected_pin2: Vec::new(),
@@ -193,11 +254,52 @@ impl PinSafetyCache {
         live
     }
 
-    /// Purge positive PIN material without weakening process-lifetime
-    /// rejection memory.
+    /// Positively cache a just-verified PIN2 for the bounded consent window.
+    ///
+    /// # Errors
+    /// Refuses a value that this process has already seen the card reject.
+    pub fn store_pin2(
+        &mut self,
+        serial: TokenSerial,
+        pin: PinBytes,
+    ) -> Result<(), PreviouslyRejectedPin> {
+        self.store_pin2_at(serial, pin, Instant::now())
+    }
+
+    /// Destructively check out PIN2 only for the freshly read live serial.
+    /// Expiry or mismatch destroys the positive entry.
+    pub fn checkout_pin2(&mut self, live_serial: &TokenSerial) -> Option<CheckedOutPin2> {
+        self.checkout_pin2_at(live_serial, Instant::now())
+    }
+
+    /// Whether unexpired positive PIN2 state exists. This does not expose the
+    /// secret or authorize card use; checkout still requires a freshly read
+    /// matching full serial.
+    pub fn has_positive_pin2(&mut self) -> bool {
+        let now = Instant::now();
+        let live = self.positive_pin2.as_ref().is_some_and(|entry| {
+            now.checked_duration_since(entry.entered_at)
+                .is_some_and(|age| age < PIN2_CACHE_LIFETIME)
+        });
+        if !live {
+            self.positive_pin2 = None;
+        }
+        live
+    }
+
+    /// Purge positive PIN1 material without weakening process-lifetime
+    /// rejection memory. PIN2 has its own [`Self::clear_positive_pin2`] and its
+    /// own generation counter, so a PIN1 event never disturbs an in-flight
+    /// signing batch.
     pub fn clear_positive(&mut self) {
         self.positive_pin1 = None;
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Purge positive PIN2 material, independent of PIN1.
+    pub fn clear_positive_pin2(&mut self) {
+        self.positive_pin2 = None;
+        self.generation_pin2 = self.generation_pin2.wrapping_add(1);
     }
 
     /// Whether `pin` has already been rejected by the card for `slot`.
@@ -214,6 +316,7 @@ impl PinSafetyCache {
     /// now known to have changed.
     pub fn record_rejected(&mut self, serial: &TokenSerial, slot: PinSlot, pin: &PinBytes) {
         self.clear_positive();
+        self.clear_positive_pin2();
         let fingerprint = self.fingerprint(serial, slot, pin);
         let rejected = self.rejected_mut(slot);
         if !rejected
@@ -265,6 +368,47 @@ impl PinSafetyCache {
         self.positive_pin1
             .take()
             .map(|entry| CheckedOutPin1 { entry })
+    }
+
+    fn store_pin2_at(
+        &mut self,
+        serial: TokenSerial,
+        pin: PinBytes,
+        now: Instant,
+    ) -> Result<(), PreviouslyRejectedPin> {
+        if self.is_rejected(&serial, PinSlot::Pin2, &pin) {
+            return Err(PreviouslyRejectedPin {
+                slot: PinSlot::Pin2,
+            });
+        }
+        self.clear_positive_pin2();
+        self.positive_pin2 = Some(CachedPin2 {
+            serial,
+            pin,
+            entered_at: now,
+            generation: self.generation_pin2,
+        });
+        Ok(())
+    }
+
+    fn checkout_pin2_at(
+        &mut self,
+        live_serial: &TokenSerial,
+        now: Instant,
+    ) -> Option<CheckedOutPin2> {
+        let live = self.positive_pin2.as_ref().is_some_and(|entry| {
+            entry.serial == *live_serial
+                && now
+                    .checked_duration_since(entry.entered_at)
+                    .is_some_and(|age| age < PIN2_CACHE_LIFETIME)
+        });
+        if !live {
+            self.clear_positive_pin2();
+            return None;
+        }
+        self.positive_pin2
+            .take()
+            .map(|entry| CheckedOutPin2 { entry })
     }
 
     fn fingerprint(
@@ -325,7 +469,9 @@ impl core::fmt::Debug for PinSafetyCache {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PinSafetyCache")
             .field("positive_pin1", &self.positive_pin1.is_some())
+            .field("positive_pin2", &self.positive_pin2.is_some())
             .field("generation", &self.generation)
+            .field("generation_pin2", &self.generation_pin2)
             .field("rejected_pin1_count", &self.rejected_pin1.len())
             .field("rejected_pin2_count", &self.rejected_pin2.len())
             .finish_non_exhaustive()
@@ -347,7 +493,9 @@ mod tests {
     fn cache() -> PinSafetyCache {
         PinSafetyCache {
             positive_pin1: None,
+            positive_pin2: None,
             generation: 0,
+            generation_pin2: 0,
             fingerprint_key: [0xA5_u8; 32],
             rejected_pin1: Vec::new(),
             rejected_pin2: Vec::new(),
@@ -355,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn positive_pin1_expires_at_five_minutes() {
+    fn positive_pin1_expires_at_its_lifetime() {
         let now = Instant::now();
         let card = serial("CARD-A-FULL-SERIAL");
         let mut cache = cache();
@@ -514,5 +662,113 @@ mod tests {
         cache.clear_positive();
         checkout.restore_after_success_at(&mut cache, now);
         assert!(cache.checkout_pin1_at(&card, now).is_none());
+    }
+
+    #[test]
+    fn pin2_is_reusable_within_its_window_then_expires_from_entry() {
+        let now = Instant::now();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = cache();
+        cache
+            .store_pin2_at(card.clone(), pin(b"135790"), now)
+            .expect("fresh PIN2 is accepted");
+        // Reusable for several signatures inside the consent window.
+        for offset_secs in [0_u64, 20, 40] {
+            let at = now + Duration::from_secs(offset_secs);
+            let checkout = cache
+                .checkout_pin2_at(&card, at)
+                .expect("PIN2 remains live inside the consent window");
+            checkout.restore_after_success(&mut cache);
+        }
+        // The window is measured from entry, so it lapses at the deadline.
+        assert!(
+            cache
+                .checkout_pin2_at(&card, now + PIN2_CACHE_LIFETIME)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pin2_window_is_not_extended_by_use() {
+        let now = Instant::now();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = cache();
+        cache
+            .store_pin2_at(card.clone(), pin(b"135790"), now)
+            .expect("fresh PIN2 is accepted");
+        // A use late in the window does not buy another full minute.
+        let late = (now + PIN2_CACHE_LIFETIME)
+            .checked_sub(Duration::from_secs(1))
+            .expect("one second is less than the PIN2 lifetime");
+        let checkout = cache
+            .checkout_pin2_at(&card, late)
+            .expect("PIN2 live just before expiry");
+        checkout.restore_after_success(&mut cache);
+        assert!(
+            cache
+                .checkout_pin2_at(&card, now + PIN2_CACHE_LIFETIME)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejected_pin2_cannot_enter_positive_cache() {
+        let mut cache = cache();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let rejected = pin(b"135790");
+        cache.record_rejected(&card, PinSlot::Pin2, &rejected);
+        assert_eq!(
+            cache.store_pin2(card, rejected),
+            Err(PreviouslyRejectedPin {
+                slot: PinSlot::Pin2
+            })
+        );
+    }
+
+    #[test]
+    fn pin2_serial_mismatch_destroys_positive_entry() {
+        let now = Instant::now();
+        let card_a = serial("CARD-A-FULL-SERIAL");
+        let card_b = serial("CARD-B-FULL-SERIAL");
+        let mut cache = cache();
+        cache
+            .store_pin2_at(card_a.clone(), pin(b"135790"), now)
+            .expect("fresh PIN2 is accepted");
+        assert!(cache.checkout_pin2_at(&card_b, now).is_none());
+        assert!(cache.checkout_pin2_at(&card_a, now).is_none());
+    }
+
+    #[test]
+    fn clearing_pin2_prevents_checked_out_entry_resurrection() {
+        let now = Instant::now();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = cache();
+        cache
+            .store_pin2_at(card.clone(), pin(b"135790"), now)
+            .expect("fresh PIN2 is accepted");
+        let checkout = cache
+            .checkout_pin2_at(&card, now)
+            .expect("entry can be checked out");
+        cache.clear_positive_pin2();
+        checkout.restore_after_success(&mut cache);
+        assert!(cache.checkout_pin2_at(&card, now).is_none());
+    }
+
+    #[test]
+    fn pin1_event_does_not_disturb_a_cached_pin2() {
+        let now = Instant::now();
+        let card = serial("CARD-A-FULL-SERIAL");
+        let mut cache = cache();
+        cache
+            .store_pin2_at(card.clone(), pin(b"135790"), now)
+            .expect("fresh PIN2 is accepted");
+        // A PIN1 invalidation bumps only the PIN1 generation.
+        cache.clear_positive();
+        // The signing batch's PIN2 survives untouched.
+        let checkout = cache
+            .checkout_pin2_at(&card, now)
+            .expect("PIN2 is unaffected by a PIN1 event");
+        checkout.restore_after_success(&mut cache);
+        assert!(cache.checkout_pin2_at(&card, now).is_some());
     }
 }
