@@ -22,7 +22,9 @@ pub mod base64url;
 pub mod cbor;
 pub mod hashes;
 pub mod ids;
+pub mod noise;
 pub mod offer;
+pub mod transport;
 
 /// The two-element wire version of RAPP 0.1 (specification Section 6).
 pub const WIRE_VERSION: (u64, u64) = (0, 1);
