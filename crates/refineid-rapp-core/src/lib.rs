@@ -22,6 +22,7 @@ pub mod base64url;
 pub mod cbor;
 pub mod hashes;
 pub mod ids;
+pub mod message;
 pub mod noise;
 pub mod offer;
 pub mod transport;
