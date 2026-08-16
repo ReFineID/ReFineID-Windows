@@ -20,12 +20,15 @@
 
 pub mod base64url;
 pub mod cbor;
+pub mod engine;
 pub mod hashes;
 pub mod ids;
 pub mod message;
 pub mod noise;
 pub mod offer;
+pub mod profiles;
 pub mod states;
+pub mod store;
 pub mod transport;
 
 /// The two-element wire version of RAPP 0.1 (specification Section 6).
