@@ -18,7 +18,20 @@
 //! profiles are supplied through a trait; nothing here trusts a transport to
 //! establish RAPP identity.
 
+pub mod base64url;
 pub mod cbor;
+pub mod hashes;
+pub mod ids;
+pub mod offer;
+
+/// The two-element wire version of RAPP 0.1 (specification Section 6).
+pub const WIRE_VERSION: (u64, u64) = (0, 1);
+
+/// The mandatory pairing handshake construction (specification Section 8.1).
+pub const PAIRING_SUITE: &str = "Noise_XXpsk3_25519_ChaChaPoly_SHA256";
+
+/// The mandatory session handshake construction (specification Section 8.1).
+pub const SESSION_SUITE: &str = "Noise_KK_25519_ChaChaPoly_SHA256";
 
 /// Named resource limits from specification Section 7.4.
 pub mod limits {
