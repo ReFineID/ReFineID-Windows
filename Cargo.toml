@@ -6,6 +6,7 @@ members = [
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
     "crates/refineid-msi",
+    "crates/refineid-rapp-core",
     "crates/refineid-settings-ffi",
     "crates/refineid-windows-credential-store",
 ]
