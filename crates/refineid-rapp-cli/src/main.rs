@@ -155,6 +155,7 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
         qr.render::<qrcode::render::unicode::Dense1x2>().build()
     );
     println!("scan with ReFineID on the iPhone; the offer expires in three minutes");
+    flush_now();
 
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
     let pair_id = loop {
@@ -197,9 +198,11 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
         record.peer_platform,
         record.granted_profiles.join(", ")
     );
+    flush_now();
     let expected_token = record.rendezvous_token;
 
     println!("waiting for the phone to connect; open ReFineID and choose this computer");
+    flush_now();
     loop {
         let accepted = match listener.accept() {
             Ok(accepted) => accepted,
@@ -228,6 +231,7 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
             }
         };
         println!("session healthy; running operations (approve each on the phone)");
+        flush_now();
 
         let mut operations = vec![
             CardOperation::InspectCard,
@@ -248,7 +252,10 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
             print!("{} ... ", operation.action());
             let _ = std::io::stdout().flush();
             match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
-                Ok(outcome) => report(operation, &outcome),
+                Ok(outcome) => {
+                    report(operation, &outcome);
+                    flush_now();
+                }
                 Err(error) => {
                     println!("not admitted: {error:?}");
                     break;
@@ -260,7 +267,14 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
         }
         requester.disconnect(&mut session, CloseReason::UserDisconnect);
         println!("session closed; waiting for the next connection (Ctrl-C to quit)");
+        flush_now();
     }
+}
+
+/// Pushes buffered output through redirected stdout, which is block
+/// buffered, so progress is visible while the process waits.
+fn flush_now() {
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
 /// The both-device grant confirmation of specification Section 9.3 step 7.
