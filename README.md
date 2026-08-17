@@ -89,8 +89,12 @@ Requirements:
 
 - Windows 11;
 - Rust 1.97.1 through `rustup`;
-- .NET SDK 10 for ReFineID Settings;
-- Visual Studio 2022 Build Tools with the MSVC C++ workload.
+- .NET SDK 10 for the WinUI apps;
+- Visual Studio 2026 (Community or Build Tools) with the *Desktop development
+  with C++* workload, including the MSVC build tools for the host architecture.
+
+See [docs/toolchain.md](docs/toolchain.md) for the architecture-specific tool
+requirements and for cross-building the Windows target from macOS or Linux.
 
 Build both supported architectures:
 
