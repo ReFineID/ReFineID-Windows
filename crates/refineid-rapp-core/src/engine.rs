@@ -14,10 +14,10 @@
 
 use zeroize::Zeroizing;
 
-use crate::cbor::Value;
 use crate::hashes::{grants_hash, request_hash};
 use crate::ids::{
-    Challenge, OperationId, PairId, PairingSecret, SessionId, derive_pair_id, derive_session_id,
+    Challenge, OperationId, PairId, PairingSecret, SessionId, derive_pair_id,
+    derive_rendezvous_token, derive_session_id,
 };
 use crate::limits;
 use crate::message::{
@@ -29,7 +29,7 @@ use crate::noise::{
     run_pairing_handshake, run_session_handshake,
 };
 use crate::offer::{OfferError, PairingOffer};
-use crate::profiles::has_consequential_command;
+use crate::operations::{CardOperation, CardOperationResult, OperationError};
 use crate::states::{
     OPERATION_TRANSITIONS, OperationEvent, OperationState, SESSION_TRANSITIONS, SessionEvent,
     SessionState, requester_transition,
@@ -93,11 +93,8 @@ pub enum PairingError {
 pub enum SessionError {
     /// No pairing record exists.
     UnknownPairing,
-    /// The pairing is quarantined or revoked.
+    /// The pairing is revoked.
     NotPaired(PairingDisposition),
-    /// The previous close recorded the user-intent requirement and this
-    /// attempt was not user-initiated (Section 13.4 step 8).
-    UserIntentRequired,
     /// The session handshake failed. When `suggest_repairing` is true,
     /// three consecutive candidates failed authentication and re-pairing
     /// should be suggested without touching stored keys (Section 14.6).
@@ -136,13 +133,15 @@ pub enum AdmissionError {
     RandomUnavailable,
     /// A component exceeded an encoding limit.
     Encoding,
+    /// The typed operation violated a Section 13.2.1 invariant.
+    Operation(OperationError),
 }
 
 /// How a finished operation ended, with the session consequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OperationOutcome {
-    /// The result was delivered and acknowledged.
-    Completed(Vec<(String, Value)>),
+    /// The result was delivered, schema-validated, and acknowledged.
+    Completed(CardOperationResult),
     /// The proxy user denied before commit.
     Denied,
     /// Cancellation or expiry before physical transmission.
@@ -150,7 +149,8 @@ pub enum OperationOutcome {
     /// A policy or card rejection, with the profile's failure name.
     Rejected(Option<String>),
     /// The card rejected CAN, PIN 1, or PIN 2; the session closes and the
-    /// next one needs explicit user intent (`INV-16`, `INV-17`).
+    /// pairing is durably revoked on both peers (`INV-16`, `INV-17`,
+    /// Section 13.4).
     CredentialRejected,
     /// Completion cannot be proven; automatic retry is permanently
     /// forbidden (`INV-06`).
@@ -169,7 +169,7 @@ pub enum SessionEnd {
     /// A frame failed authenticated decryption (policy class 2).
     IntegrityFailure,
     /// The peer committed an authenticated protocol violation
-    /// (policy class 4); one strike was recorded.
+    /// (policy class 4); the pairing was revoked immediately.
     Violation,
 }
 
@@ -187,8 +187,6 @@ pub struct Session<Transport: FrameTransport> {
     pair_id: PairId,
     state: SessionState,
     granted_profiles: Vec<String>,
-    /// At most one strike is recorded per session (Section 14.6).
-    strike_recorded: bool,
     end: Option<SessionEnd>,
 }
 
@@ -356,6 +354,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .ok_or(PairingError::HandshakeFailed)?;
         let session_id = derive_session_id(&completed.handshake_hash);
         let pair_id = derive_pair_id(&completed.handshake_hash);
+        let rendezvous_token = derive_rendezvous_token(&completed.handshake_hash);
         let mut channel = MessageChannel::new(completed.channel, session_id);
 
         // Both peers exchange pairing.hello with the negotiated-parameter
@@ -451,6 +450,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         self.store
             .insert(PairingRecord {
                 pair_id,
+                rendezvous_token,
                 local_private: Zeroizing::new(local_keys.private.to_vec()),
                 local_public: local_keys.public.clone(),
                 peer_public,
@@ -458,10 +458,8 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                 grants_hash: grants,
                 peer_display_name: peer.display_name,
                 peer_platform: peer.platform,
-                strikes: 0,
                 disposition: PairingDisposition::Paired,
                 peer_initiated_termination: false,
-                requires_user_intent: false,
                 candidate_failures: 0,
             })
             .map_err(PairingError::Store)?;
@@ -483,7 +481,6 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         &mut self,
         pair_id: PairId,
         transport: Transport,
-        user_initiated: bool,
     ) -> Result<Session<Transport>, SessionError> {
         let record = self
             .store
@@ -491,12 +488,6 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             .map_err(|_| SessionError::UnknownPairing)?;
         if record.disposition != PairingDisposition::Paired {
             return Err(SessionError::NotPaired(record.disposition));
-        }
-        // Guard initiation_permitted: after a close that recorded the
-        // user-intent requirement, an application action alone opens
-        // nothing (Section 13.4 step 8).
-        if record.requires_user_intent && !user_initiated {
-            return Err(SessionError::UserIntentRequired);
         }
         let granted_profiles = record.granted_profiles.clone();
         let grants = record.grants_hash;
@@ -532,7 +523,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                     })
                     .map_err(SessionError::Store)?;
                 return Err(SessionError::HandshakeFailed {
-                    suggest_repairing: failures >= limits::VIOLATION_STRIKE_LIMIT,
+                    suggest_repairing: failures >= limits::CANDIDATE_FAILURE_HINT_THRESHOLD,
                 });
             }
         };
@@ -582,7 +573,6 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             pair_id,
             state: SessionState::Healthy,
             granted_profiles,
-            strike_recorded: false,
             end: None,
         })
     }
@@ -689,12 +679,12 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     pub fn execute<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
-        profile: &str,
-        action: &str,
-        context: Vec<(String, Value)>,
-        payload: Vec<(String, Value)>,
+        operation: &CardOperation,
         expires_after_ms: u64,
     ) -> Result<OperationOutcome, AdmissionError> {
+        let profile = operation.profile();
+        let action = operation.action();
+        let (context, payload) = operation.wire_parts().map_err(AdmissionError::Operation)?;
         // Admission (X-08, INV-02, INV-04).
         if session.state != SessionState::Healthy {
             return Err(AdmissionError::SessionNotHealthy);
@@ -712,7 +702,7 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
             &payload,
         )
         .map_err(|_| AdmissionError::Encoding)?;
-        let consequential = has_consequential_command(profile);
+        let consequential = operation.is_consequential();
         let mut state =
             advance_operation(OperationState::Idle, OperationEvent::OperationRequestSent)
                 .ok_or(AdmissionError::SessionNotHealthy)?;
@@ -856,25 +846,40 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
                         self.handle_violation(session, Some((operation_id, state)));
                         return Ok(self.classify_after_close(operation_id, state));
                     };
+                    // Section 13.2.1: a completed body must answer exactly
+                    // this operation's schema, and every other status
+                    // carries an empty body. A mismatch in a successfully
+                    // decrypted message is an authenticated violation.
+                    if next == OperationState::Completed {
+                        let Ok(result) = CardOperationResult::from_body(operation, body) else {
+                            self.handle_violation(session, Some((operation_id, state)));
+                            return Ok(self.classify_after_close(operation_id, state));
+                        };
+                        state = next;
+                        self.journal_state(operation_id, state, false);
+                        let _ = session.channel.send(Body::OperationResultAck {
+                            operation_id,
+                            request_hash: hash,
+                        });
+                        return Ok(OperationOutcome::Completed(result));
+                    }
+                    if !body.is_empty() {
+                        self.handle_violation(session, Some((operation_id, state)));
+                        return Ok(self.classify_after_close(operation_id, state));
+                    }
                     state = next;
                     let retry_prohibited = state == OperationState::Ambiguous;
                     self.journal_state(operation_id, state, retry_prohibited);
                     return Ok(match state {
-                        OperationState::Completed => {
-                            let _ = session.channel.send(Body::OperationResultAck {
-                                operation_id,
-                                request_hash: hash,
-                            });
-                            OperationOutcome::Completed(body)
-                        }
                         OperationState::Denied => OperationOutcome::Denied,
                         OperationState::Cancelled => OperationOutcome::Cancelled,
                         OperationState::Rejected => OperationOutcome::Rejected(error),
                         OperationState::CredentialRejected => {
-                            // INV-16: the proxy closes the session; record
-                            // the user-intent requirement now and consume
-                            // the close when it arrives.
-                            self.set_requires_user_intent(session.pair_id);
+                            // INV-16 and Section 13.4: the authenticated
+                            // credential_rejected result durably revokes the
+                            // pairing on this peer before the terminal
+                            // outcome is reported; the proxy then closes.
+                            self.revoke_pairing(session.pair_id, false);
                             self.await_close_after_credential_rejection(session);
                             OperationOutcome::CredentialRejected
                         }
@@ -1035,66 +1040,44 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
         }
     }
 
-    /// Records the user-intent requirement for the next session.
-    fn set_requires_user_intent(&mut self, pair_id: PairId) {
+    /// Durably revokes the pairing: destroys both stored keys and leaves
+    /// the record as the tombstone (Section 14.6).
+    fn revoke_pairing(&mut self, pair_id: PairId, peer_initiated: bool) {
         let _ = self.store.update(pair_id, &mut |entry| {
-            entry.requires_user_intent = true;
+            entry.disposition = PairingDisposition::Revoked;
+            entry.peer_initiated_termination = peer_initiated;
+            entry.local_private = Zeroizing::new(Vec::new());
+            entry.peer_public = Vec::new();
         });
     }
 
-    /// Applies a peer close reason's pairing effect (Section 14.6).
+    /// Applies a peer close reason's pairing effect (Sections 13.4
+    /// and 14.6).
     fn apply_peer_close_reason(&mut self, pair_id: PairId, reason: CloseReason) {
         match reason {
-            CloseReason::PairingRevoked | CloseReason::PairingQuarantined => {
-                let _ = self.store.update(pair_id, &mut |entry| {
-                    entry.disposition = PairingDisposition::Revoked;
-                    entry.peer_initiated_termination = true;
-                    entry.local_private = Zeroizing::new(Vec::new());
-                    entry.peer_public = Vec::new();
-                    entry.requires_user_intent = true;
-                });
-            }
-            CloseReason::CredentialRejected | CloseReason::ProtocolViolation => {
-                self.set_requires_user_intent(pair_id);
+            CloseReason::PairingRevoked
+            | CloseReason::ProtocolViolation
+            | CloseReason::CredentialRejected => {
+                self.revoke_pairing(pair_id, true);
             }
             CloseReason::UserDisconnect | CloseReason::Policy | CloseReason::Shutdown => {}
         }
     }
 
-    /// Handles an authenticated protocol violation (policy class 4): one
-    /// strike, quarantine at the limit with its best-effort notice (X-09),
-    /// and a best-effort close.
+    /// Handles an authenticated protocol violation (policy class 4): the
+    /// first violation immediately revokes the pairing, with one
+    /// best-effort close notice (Section 14.6).
     fn handle_violation<Transport: FrameTransport>(
         &mut self,
         session: &mut Session<Transport>,
         operation: Option<(OperationId, OperationState)>,
     ) {
-        let mut reached_limit = false;
-        if !session.strike_recorded {
-            session.strike_recorded = true;
-            let _ = self.store.update(session.pair_id, &mut |entry| {
-                entry.strikes += 1;
-                reached_limit = entry.strikes >= limits::VIOLATION_STRIKE_LIMIT;
-            });
-        }
-        self.set_requires_user_intent(session.pair_id);
-        let close_reason = if reached_limit {
-            CloseReason::PairingQuarantined
-        } else {
-            CloseReason::ProtocolViolation
-        };
         let last = session.channel.last_received_sequence();
         let _ = session.channel.send(Body::SessionClose {
-            reason: close_reason,
+            reason: CloseReason::ProtocolViolation,
             last_received_sequence: last,
         });
-        if reached_limit {
-            let _ = self.store.update(session.pair_id, &mut |entry| {
-                entry.disposition = PairingDisposition::Quarantined;
-                entry.local_private = Zeroizing::new(Vec::new());
-                entry.peer_public = Vec::new();
-            });
-        }
+        self.revoke_pairing(session.pair_id, false);
         let _ = operation;
         finish_close(session, SessionEnd::Violation);
     }
@@ -1107,7 +1090,6 @@ impl<Store: PairingStore, Journal: OperationJournal> Requester<Store, Journal> {
     ) -> OperationOutcome {
         if state.is_terminal() {
             return match state {
-                OperationState::Completed => OperationOutcome::Completed(Vec::new()),
                 OperationState::Denied => OperationOutcome::Denied,
                 OperationState::Rejected => OperationOutcome::Rejected(None),
                 OperationState::CredentialRejected => OperationOutcome::CredentialRejected,

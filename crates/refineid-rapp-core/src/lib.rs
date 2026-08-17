@@ -1,13 +1,13 @@
 //! Remote Authorization Proxy Protocol (RAPP) requester core.
 //!
-//! This crate implements the requester role of RAPP draft 26.8.16.85 for the
+//! This crate implements the requester role of RAPP draft 26.8.17.135 for the
 //! Windows port: a Windows machine asks for typed credential operations, and
 //! an authorization proxy — the holder's phone — presents consent, talks to
 //! the identity card, and returns only the profile-defined result.
 //!
 //! The implementation tracks exactly the vendored specification revision in
-//! `docs/protocol/rapp-v26.8.16.85.md` and its machine-readable transition
-//! model `docs/protocol/rapp-state-machine-v26.8.16.85.yaml`. Section
+//! `docs/protocol/rapp-v26.8.17.135.md` and its machine-readable transition
+//! model `docs/protocol/rapp-state-machine-v26.8.17.135.yaml`. Section
 //! references in this crate's documentation cite that document. Per its
 //! Section 1, this is an experimental implementation of a review draft, not
 //! a production security claim.
@@ -26,9 +26,11 @@ pub mod ids;
 pub mod message;
 pub mod noise;
 pub mod offer;
+pub mod operations;
 pub mod profiles;
 pub mod states;
 pub mod store;
+pub mod stream;
 pub mod transport;
 
 /// The two-element wire version of RAPP 0.1 (specification Section 6).
@@ -69,7 +71,7 @@ pub mod limits {
     /// Maximum pairing-offer lifetime in milliseconds (`OFFER_TTL_MAX`).
     pub const OFFER_TTL_MAX_MS: u64 = 180_000;
 
-    /// Authenticated protocol violations that quarantine a pairing
-    /// (`VIOLATION_STRIKE_LIMIT`).
-    pub const VIOLATION_STRIKE_LIMIT: u32 = 3;
+    /// Consecutive failed session-candidate authentications after which
+    /// re-pairing is suggested, stored keys untouched (Section 14.6).
+    pub const CANDIDATE_FAILURE_HINT_THRESHOLD: u32 = 3;
 }

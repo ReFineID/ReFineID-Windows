@@ -1,7 +1,7 @@
 //! Durable pairing records and the operation journal.
 //!
 //! A pairing record is the atomic store of Section 9.3 step 8: pair keys,
-//! `pair_id`, granted profiles, `grants_hash`, labels, violation strikes,
+//! `pair_id`, the rendezvous token, granted profiles, `grants_hash`, labels,
 //! and the fail-stop marker. The journal is the durable operation record of
 //! Sections 12.2 and 12.6: the requester writes its commit intent before
 //! sending commit, and terminal states are permanent.
@@ -13,7 +13,7 @@
 
 use zeroize::Zeroizing;
 
-use crate::ids::{OperationId, PairId};
+use crate::ids::{OperationId, PairId, RendezvousToken};
 use crate::states::OperationState;
 
 /// The fail-stop disposition of a stored pairing (Section 14.2).
@@ -21,9 +21,9 @@ use crate::states::OperationState;
 pub enum PairingDisposition {
     /// The pairing is usable.
     Paired,
-    /// The strike limit was reached; keys are destroyed.
-    Quarantined,
-    /// The pairing was deliberately terminated; keys are destroyed.
+    /// The pairing was terminated — by local action, authenticated peer
+    /// notice, an authenticated protocol violation, or credential rejection.
+    /// Keys are destroyed; the record is the tombstone.
     Revoked,
 }
 
@@ -31,13 +31,13 @@ pub enum PairingDisposition {
 pub struct PairingRecord {
     /// The derived pair identifier.
     pub pair_id: PairId,
-    /// The local pair-specific private key; emptied on quarantine or
-    /// revocation.
+    /// The derived pair-specific transport rendezvous token (Section 8.5).
+    pub rendezvous_token: RendezvousToken,
+    /// The local pair-specific private key; emptied on revocation.
     pub local_private: Zeroizing<Vec<u8>>,
     /// The local pair-specific public key.
     pub local_public: Vec<u8>,
-    /// The peer's pair-specific public key; emptied on quarantine or
-    /// revocation.
+    /// The peer's pair-specific public key; emptied on revocation.
     pub peer_public: Vec<u8>,
     /// The granted credential profiles.
     pub granted_profiles: Vec<String>,
@@ -47,15 +47,10 @@ pub struct PairingRecord {
     pub peer_display_name: String,
     /// The peer's platform label.
     pub peer_platform: String,
-    /// Persistent violation strikes (Section 14.6).
-    pub strikes: u32,
     /// The fail-stop disposition.
     pub disposition: PairingDisposition,
-    /// Whether the peer initiated a quarantine or revocation.
+    /// Whether the peer initiated the revocation.
     pub peer_initiated_termination: bool,
-    /// Whether the next session requires explicit user intent
-    /// (Sections 13.4 and 10).
-    pub requires_user_intent: bool,
     /// Consecutive failed session-candidate authentications, for the
     /// re-pairing hint of Section 14.6.
     pub candidate_failures: u32,
@@ -67,7 +62,6 @@ impl core::fmt::Debug for PairingRecord {
             .debug_struct("PairingRecord")
             .field("pair_id", &self.pair_id)
             .field("disposition", &self.disposition)
-            .field("strikes", &self.strikes)
             .finish_non_exhaustive()
     }
 }
@@ -260,13 +254,14 @@ mod tests {
         JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition,
         PairingRecord, PairingStore, StoreError,
     };
-    use crate::ids::{OperationId, PairId};
+    use crate::ids::{OperationId, PairId, RendezvousToken};
     use crate::states::OperationState;
     use zeroize::Zeroizing;
 
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
+            rendezvous_token: RendezvousToken([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
@@ -274,10 +269,8 @@ mod tests {
             grants_hash: [4; 32],
             peer_display_name: "Phone".into(),
             peer_platform: "iOS".into(),
-            strikes: 0,
             disposition: PairingDisposition::Paired,
             peer_initiated_termination: false,
-            requires_user_intent: false,
             candidate_failures: 0,
         }
     }
@@ -288,9 +281,9 @@ mod tests {
         let pair_id = PairId([7; 16]);
         store.insert(record(pair_id)).unwrap();
         store
-            .update(pair_id, &mut |entry| entry.strikes += 1)
+            .update(pair_id, &mut |entry| entry.candidate_failures += 1)
             .unwrap();
-        assert_eq!(store.get(pair_id).unwrap().strikes, 1);
+        assert_eq!(store.get(pair_id).unwrap().candidate_failures, 1);
         store.remove(pair_id).unwrap();
         assert!(matches!(store.get(pair_id), Err(StoreError::Unknown)));
     }

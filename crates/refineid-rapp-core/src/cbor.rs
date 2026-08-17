@@ -46,6 +46,8 @@ const ARGUMENT_EIGHT_BYTES: u8 = 27;
 const SIMPLE_FALSE: u8 = 20;
 /// Simple value true under major type 7.
 const SIMPLE_TRUE: u8 = 21;
+/// Simple-value argument for `null`.
+const SIMPLE_NULL: u8 = 22;
 
 /// One RAPP wire value.
 ///
@@ -72,6 +74,8 @@ pub enum Value {
     Map(Vec<(String, Self)>),
     /// A boolean.
     Bool(bool),
+    /// Null, used by profile schemas for an explicitly absent value.
+    Null,
 }
 
 /// Why a value could not be encoded.
@@ -236,6 +240,10 @@ fn encode_into(value: &Value, out: &mut Vec<u8>, depth: usize) -> Result<(), Enc
             out.push((MAJOR_SIMPLE << 5) | simple);
             Ok(())
         }
+        Value::Null => {
+            out.push((MAJOR_SIMPLE << 5) | SIMPLE_NULL);
+            Ok(())
+        }
     }
 }
 
@@ -324,12 +332,13 @@ fn decode_item(reader: &mut Reader<'_>, depth: usize) -> Result<Value, DecodeErr
         && head >> 5 == MAJOR_SIMPLE
     {
         // Major type 7 carries no integer argument in RAPP: the only legal
-        // items are the two boolean simple values. Every float and every
-        // other simple value is forbidden by Section 7.1.
+        // items are the two boolean simple values and null. Every float and
+        // every other simple value is forbidden by Section 7.1.
         reader.at += 1;
         return match head & 0x1F {
             SIMPLE_FALSE => Ok(Value::Bool(false)),
             SIMPLE_TRUE => Ok(Value::Bool(true)),
+            SIMPLE_NULL => Ok(Value::Null),
             _ => Err(DecodeError::ForbiddenSimpleValue),
         };
     }
@@ -488,11 +497,8 @@ mod tests {
         assert_eq!(Value::decode(&[0x5F]), Err(DecodeError::IndefiniteLength));
         // Tag 0.
         assert_eq!(Value::decode(&[0xC0, 0x00]), Err(DecodeError::TagForbidden));
-        // Null, undefined, and a float.
-        assert_eq!(
-            Value::decode(&[0xF6]),
-            Err(DecodeError::ForbiddenSimpleValue)
-        );
+        // Null round-trips; undefined and floats stay forbidden.
+        assert_eq!(Value::decode(&[0xF6]), Ok(Value::Null));
         assert_eq!(
             Value::decode(&[0xF7]),
             Err(DecodeError::ForbiddenSimpleValue)

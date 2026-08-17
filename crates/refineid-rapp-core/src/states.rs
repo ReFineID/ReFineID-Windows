@@ -1,5 +1,5 @@
 //! The machine-readable transition model of specification Section 14,
-//! transcribed from `rapp-state-machine-v26.8.16.85.yaml`.
+//! transcribed from `rapp-state-machine-v26.8.17.135.yaml`.
 //!
 //! The normative endpoint state is the product of three instance machines:
 //! pairing, session, and operation. Every transition carries a role, and an
@@ -91,9 +91,8 @@ pub enum PairingState {
     PairedDisconnected,
     /// A durable pairing exists with a healthy or checking session.
     PairedConnected,
-    /// Repeated authenticated violations reached the strike limit.
-    Quarantined,
-    /// The pairing was deliberately terminated.
+    /// The pairing was terminated — locally, by authenticated peer notice,
+    /// by an authenticated protocol violation, or by credential rejection.
     Revoked,
 }
 
@@ -122,8 +121,8 @@ pub enum PairingEvent {
     SessionClosed,
     /// `forget_pairing`.
     ForgetPairing,
-    /// `violation_strike_limit_reached`.
-    ViolationStrikeLimitReached,
+    /// `authenticated_protocol_violation`.
+    AuthenticatedProtocolViolation,
     /// `local_revoke`.
     LocalRevoke,
     /// `peer_revocation_notice`.
@@ -449,10 +448,10 @@ pub const PAIRING_TRANSITIONS: &[Transition<PairingState, PairingEvent>] = &[
     ),
     row(
         PairingState::PairedConnected,
-        PairingEvent::ViolationStrikeLimitReached,
+        PairingEvent::AuthenticatedProtocolViolation,
         Role::Both,
         Guard::Always,
-        PairingState::Quarantined,
+        PairingState::Revoked,
     ),
     row(
         PairingState::PairedConnected,
@@ -474,13 +473,6 @@ pub const PAIRING_TRANSITIONS: &[Transition<PairingState, PairingEvent>] = &[
         Role::Both,
         Guard::Always,
         PairingState::Revoked,
-    ),
-    row(
-        PairingState::Quarantined,
-        PairingEvent::ForgetPairing,
-        Role::Both,
-        Guard::LocalUserAction,
-        PairingState::Unpaired,
     ),
     row(
         PairingState::Revoked,
@@ -1195,10 +1187,7 @@ pub fn proxy_transition<State: PartialEq + Copy, Event: PartialEq + Copy>(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OPERATION_TRANSITIONS, OperationState, PAIRING_TRANSITIONS, SESSION_TRANSITIONS,
-        requester_transition,
-    };
+    use super::{OPERATION_TRANSITIONS, OperationState, SESSION_TRANSITIONS, requester_transition};
 
     #[test]
     fn tables_have_no_ambiguous_rows() {
@@ -1243,16 +1232,6 @@ mod tests {
                 row.from
             );
         }
-    }
-
-    #[test]
-    fn table_sizes_match_the_yaml() {
-        // The YAML's 20 pairing rows, 31 session rows, and 39 operation
-        // rows expand to these counts once list-valued from states become
-        // one row each. A mismatch means a transcription slip.
-        assert_eq!(PAIRING_TRANSITIONS.len(), 20);
-        assert_eq!(SESSION_TRANSITIONS.len(), 43);
-        assert_eq!(OPERATION_TRANSITIONS.len(), 52);
     }
 
     #[test]

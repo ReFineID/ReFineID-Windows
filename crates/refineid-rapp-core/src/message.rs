@@ -116,14 +116,14 @@ pub enum CloseReason {
     UserDisconnect,
     /// Local policy closed the session.
     Policy,
-    /// The card rejected CAN, PIN 1, or PIN 2 (Section 13.4).
+    /// The card rejected CAN, PIN 1, or PIN 2 (Section 13.4); the pairing
+    /// is revoked on both peers.
     CredentialRejected,
-    /// An authenticated protocol violation closed the session.
+    /// An authenticated protocol violation closed the session and revoked
+    /// the pairing; the peer must mark its record revoked (Section 14.6).
     ProtocolViolation,
     /// The pairing was revoked; the peer must mark its record revoked.
     PairingRevoked,
-    /// The pairing reached the strike limit; the peer marks revoked.
-    PairingQuarantined,
     /// The endpoint is shutting down.
     Shutdown,
 }
@@ -138,7 +138,6 @@ impl CloseReason {
             Self::CredentialRejected => "credential_rejected",
             Self::ProtocolViolation => "protocol_violation",
             Self::PairingRevoked => "pairing_revoked",
-            Self::PairingQuarantined => "pairing_quarantined",
             Self::Shutdown => "shutdown",
         }
     }
@@ -151,7 +150,6 @@ impl CloseReason {
             "credential_rejected" => Self::CredentialRejected,
             "protocol_violation" => Self::ProtocolViolation,
             "pairing_revoked" => Self::PairingRevoked,
-            "pairing_quarantined" => Self::PairingQuarantined,
             "shutdown" => Self::Shutdown,
             _ => return Err(SchemaViolation::UnknownDiscriminant),
         })

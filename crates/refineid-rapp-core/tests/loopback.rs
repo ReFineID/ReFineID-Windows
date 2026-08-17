@@ -5,8 +5,8 @@
 //! the holder's phones. It speaks the exact wire so the requester is
 //! exercised end to end - pairing with grant agreement, sessions with the
 //! parameter echo, the prepare/commit/result exchange, denial, credential
-//! rejection with the user-intent consequence, violation strikes reaching
-//! quarantine, and ambiguity on a committed close.
+//! rejection revoking the pairing, immediate revocation on the first
+//! authenticated violation, and ambiguity on a committed close.
 
 #![allow(
     clippy::unwrap_used,
@@ -36,6 +36,9 @@ use refineid_rapp_core::noise::{
     pairing_prologue, run_pairing_handshake, run_session_handshake, session_prologue,
 };
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
+use refineid_rapp_core::operations::{
+    CardOperation, CardOperationResult, KeyProfile, SignatureAlgorithm,
+};
 use refineid_rapp_core::profiles::{PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS};
 use refineid_rapp_core::store::{
     MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition, PairingStore,
@@ -75,6 +78,28 @@ fn test_offer() -> PairingOffer {
         }],
         offer_ttl_ms: 120_000,
     }
+}
+
+/// A registered consequential operation for the authentication tests.
+fn authentication_operation() -> CardOperation {
+    CardOperation::BrowserAuthenticate {
+        origin: "kortti.tunnistautuminen.suomi.fi".into(),
+        key_profile: KeyProfile::Rsa3072,
+        algorithm: SignatureAlgorithm::RsaPkcs1Sha256,
+        digest: vec![0x2a; SignatureAlgorithm::RsaPkcs1Sha256.digest_length()],
+    }
+}
+
+/// A schema-exact completed inspection body for the scripted proxy.
+fn inspection_body() -> Vec<(String, Value)> {
+    vec![
+        ("type".to_owned(), Value::Text("inspection".into())),
+        ("pin1_factory".to_owned(), Value::Bool(false)),
+        ("pin2_factory".to_owned(), Value::Bool(false)),
+        ("pin1_attempts".to_owned(), Value::Unsigned(5)),
+        ("pin2_attempts".to_owned(), Value::Unsigned(5)),
+        ("puk_attempts".to_owned(), Value::Null),
+    ]
 }
 
 /// The proxy's durable half of a pairing, kept across sessions.
@@ -282,7 +307,8 @@ fn pairing_stores_matching_records_on_both_sides() {
     assert_eq!(record.granted_profiles, granted);
     assert_eq!(record.disposition, PairingDisposition::Paired);
     assert_eq!(record.peer_display_name, "Phone");
-    assert_eq!(record.strikes, 0);
+    assert_ne!(record.rendezvous_token.0, [0u8; 16]);
+    assert_ne!(record.rendezvous_token.0, record.pair_id.0);
 }
 
 #[test]
@@ -340,30 +366,30 @@ fn card_status_completes_without_commit() {
             request_hash,
             status: ResultStatus::Completed,
             error: None,
-            body: vec![("card_present".into(), Value::Bool(true))],
+            body: inspection_body(),
         });
         let Body::OperationResultAck { .. } = channel.receive() else {
             panic!("expected the completed result to be acknowledged");
         };
     });
-    let mut session = requester
-        .connect(pair_id, requester_transport, true)
-        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
-        .execute(
-            &mut session,
-            PROFILE_CARD_STATUS,
-            "inspect",
-            vec![],
-            vec![],
-            30_000,
-        )
+        .execute(&mut session, &CardOperation::InspectCard, 30_000)
         .unwrap();
     proxy.join().unwrap();
-    let OperationOutcome::Completed(body) = outcome else {
+    let OperationOutcome::Completed(result) = outcome else {
         panic!("expected completion, got {outcome:?}");
     };
-    assert_eq!(body, vec![("card_present".to_owned(), Value::Bool(true))]);
+    assert_eq!(
+        result,
+        CardOperationResult::Inspection {
+            pin1_factory: false,
+            pin2_factory: false,
+            pin1_attempts: Some(5),
+            pin2_attempts: Some(5),
+            puk_attempts: None,
+        }
+    );
 }
 
 #[test]
@@ -400,27 +426,24 @@ fn authentication_walks_prepare_commit_result() {
             request_hash,
             status: ResultStatus::Completed,
             error: None,
-            body: vec![("signature".into(), Value::Bytes(vec![0xAB; 96]))],
+            body: vec![
+                ("type".to_owned(), Value::Text("signature".into())),
+                ("bytes".to_owned(), Value::Bytes(vec![0xAB; 96])),
+            ],
         });
         let Body::OperationResultAck { .. } = channel.receive() else {
             panic!("expected the completed result to be acknowledged");
         };
     });
-    let mut session = requester
-        .connect(pair_id, requester_transport, true)
-        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
-        .execute(
-            &mut session,
-            PROFILE_AUTHENTICATION,
-            "sign",
-            vec![("origin".into(), Value::Text("suomi.fi".into()))],
-            vec![("digest".into(), Value::Bytes(vec![0x11; 32]))],
-            60_000,
-        )
+        .execute(&mut session, &authentication_operation(), 60_000)
         .unwrap();
     proxy.join().unwrap();
-    assert!(matches!(outcome, OperationOutcome::Completed(_)));
+    assert_eq!(
+        outcome,
+        OperationOutcome::Completed(CardOperationResult::Signature(vec![0xAB; 96]))
+    );
 }
 
 #[test]
@@ -449,19 +472,10 @@ fn denial_leaves_the_session_healthy() {
             });
         }
     });
-    let mut session = requester
-        .connect(pair_id, requester_transport, true)
-        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     for _ in 0..2 {
         let outcome = requester
-            .execute(
-                &mut session,
-                PROFILE_AUTHENTICATION,
-                "sign",
-                vec![],
-                vec![],
-                30_000,
-            )
+            .execute(&mut session, &authentication_operation(), 30_000)
             .unwrap();
         assert_eq!(outcome, OperationOutcome::Denied);
     }
@@ -469,7 +483,7 @@ fn denial_leaves_the_session_healthy() {
 }
 
 #[test]
-fn credential_rejection_closes_and_demands_user_intent() {
+fn credential_rejection_revokes_the_pairing() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
@@ -496,29 +510,25 @@ fn credential_rejection_closes_and_demands_user_intent() {
             last_received_sequence: 1,
         });
     });
-    let mut session = requester
-        .connect(pair_id, requester_transport, true)
-        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
-        .execute(
-            &mut session,
-            PROFILE_AUTHENTICATION,
-            "sign",
-            vec![],
-            vec![],
-            30_000,
-        )
+        .execute(&mut session, &authentication_operation(), 30_000)
         .unwrap();
     proxy.join().unwrap();
     assert_eq!(outcome, OperationOutcome::CredentialRejected);
-    assert!(requester.store().get(pair_id).unwrap().requires_user_intent);
+    // Section 13.4: the authenticated credential_rejected result durably
+    // revokes the pairing before the terminal outcome is reported.
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(record.local_private.is_empty());
+    assert!(record.peer_public.is_empty());
 
-    // An application action alone opens nothing now; a user action does.
+    // Recovery requires a new manual pairing ceremony.
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     drop(proxy_transport);
     assert!(matches!(
-        requester.connect(pair_id, requester_transport, false),
-        Err(SessionError::UserIntentRequired)
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::NotPaired(PairingDisposition::Revoked))
     ));
 }
 
@@ -548,18 +558,9 @@ fn committed_close_classifies_as_ambiguous() {
         // The transport dies with the operation committed.
         drop(channel);
     });
-    let mut session = requester
-        .connect(pair_id, requester_transport, true)
-        .unwrap();
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
-        .execute(
-            &mut session,
-            PROFILE_AUTHENTICATION,
-            "sign",
-            vec![],
-            vec![],
-            30_000,
-        )
+        .execute(&mut session, &authentication_operation(), 30_000)
         .unwrap();
     proxy.join().unwrap();
     assert_eq!(outcome, OperationOutcome::Ambiguous);
@@ -569,76 +570,50 @@ fn committed_close_classifies_as_ambiguous() {
 }
 
 #[test]
-fn sequence_violations_strike_and_the_third_quarantines() {
+fn first_sequence_violation_revokes_the_pairing() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
     let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
 
-    for expected_strikes in 1..=3u32 {
-        let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
-        let pairing = ProxyPairing {
-            keys: PairKeys {
-                private: proxy_pairing.keys.private.clone(),
-                public: proxy_pairing.keys.public.clone(),
-            },
-            requester_public: proxy_pairing.requester_public.clone(),
-            pair_id: proxy_pairing.pair_id,
-            grants: proxy_pairing.grants,
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
+        let Body::OperationRequest {
+            operation_id,
+            request_hash,
+            ..
+        } = channel.receive()
+        else {
+            panic!("expected an operation request");
         };
-        let proxy = std::thread::spawn(move || {
-            let mut channel = proxy_accept_session(&pairing, proxy_transport);
-            let Body::OperationRequest {
-                operation_id,
-                request_hash,
-                ..
-            } = channel.receive()
-            else {
-                panic!("expected an operation request");
-            };
-            // A skipped sequence inside the authenticated channel is an
-            // authenticated protocol violation on the receiver.
-            channel.send_with_sequence_gap(Body::OperationResult {
-                operation_id,
-                request_hash,
-                status: ResultStatus::Completed,
-                error: None,
-                body: vec![],
-            });
-            // The requester answers with its best-effort close.
+        // A skipped sequence inside the authenticated channel is an
+        // authenticated protocol violation on the receiver.
+        channel.send_with_sequence_gap(Body::OperationResult {
+            operation_id,
+            request_hash,
+            status: ResultStatus::Completed,
+            error: None,
+            body: vec![],
         });
-        let mut session = requester
-            .connect(pair_id, requester_transport, true)
-            .unwrap();
-        let outcome = requester
-            .execute(
-                &mut session,
-                PROFILE_CARD_STATUS,
-                "inspect",
-                vec![],
-                vec![],
-                30_000,
-            )
-            .unwrap();
-        proxy.join().unwrap();
-        // Pre-commit closure classifies the operation as cancelled.
-        assert_eq!(outcome, OperationOutcome::Cancelled);
-        let record = requester.store().get(pair_id).unwrap();
-        assert_eq!(record.strikes, expected_strikes);
-        if expected_strikes < 3 {
-            assert_eq!(record.disposition, PairingDisposition::Paired);
-            // The user-intent record applies after a violation close; the
-            // next attempt here is explicitly user-initiated.
-        } else {
-            assert_eq!(record.disposition, PairingDisposition::Quarantined);
-            assert!(record.local_private.is_empty());
-            assert!(record.peer_public.is_empty());
-        }
-    }
+        // The requester answers with its best-effort close.
+    });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
+    let outcome = requester
+        .execute(&mut session, &CardOperation::InspectCard, 30_000)
+        .unwrap();
+    proxy.join().unwrap();
+    // Pre-commit closure classifies the operation as cancelled.
+    assert_eq!(outcome, OperationOutcome::Cancelled);
+    // Section 14.6: the first authenticated violation revokes immediately.
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(record.local_private.is_empty());
+    assert!(record.peer_public.is_empty());
 
-    // Quarantined keys are never restored (INV-07).
+    // Revoked keys are never restored (INV-07).
     let (requester_transport, _other) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     assert!(matches!(
-        requester.connect(pair_id, requester_transport, true),
-        Err(SessionError::NotPaired(PairingDisposition::Quarantined))
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::NotPaired(PairingDisposition::Revoked))
     ));
 }

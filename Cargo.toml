@@ -6,6 +6,7 @@ members = [
     "crates/refineid-lib-pcsc",
     "crates/refineid-minidriver",
     "crates/refineid-msi",
+    "crates/refineid-rapp-cli",
     "crates/refineid-rapp-core",
     "crates/refineid-settings-ffi",
     "crates/refineid-windows-credential-store",
@@ -23,6 +24,7 @@ rust-version = "1.91"
 refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
+refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
 
 aes = "0.9"
@@ -32,12 +34,16 @@ const-oid = { version = "0.10", default-features = false }
 crypto-bigint = { version = "0.7", features = ["alloc", "zeroize"] }
 getrandom = "0.4"
 hex = "0.4"
+# Terminal QR rendering for the RAPP pairing offer in the requester CLI.
+# Pure Rust; the image and SVG render features stay off.
+qrcode = { version = "0.14", default-features = false }
 hmac = "0.13"
 pcsc = "2.9"
 pkcs1 = "0.7"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 sha1 = "0.11"
 sha2 = "0.11"
 spki = "0.7"
