@@ -28,7 +28,7 @@
 
 use refineid_rapp_core::ids::PairId;
 use refineid_rapp_core::persistence::{decode_pairing_records, encode_pairing_records};
-use refineid_rapp_core::store::{PairingRecord, PairingStore, StoreError};
+use refineid_rapp_core::store::{PairingDisposition, PairingRecord, PairingStore, StoreError};
 
 use crate::CredentialStoreError;
 
@@ -68,6 +68,17 @@ impl CredentialPairingStore {
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.records.is_empty()
+    }
+
+    /// The first usable (non-revoked) stored pairing, if any.
+    ///
+    /// A caller that reconnects to a stored pairing needs its `pair_id` and
+    /// rendezvous token without having kept them from the pairing ceremony.
+    #[must_use]
+    pub fn usable_pairing(&self) -> Option<&PairingRecord> {
+        self.records
+            .iter()
+            .find(|record| record.disposition == PairingDisposition::Paired)
     }
 
     /// Writes the current record set through to the credential.
