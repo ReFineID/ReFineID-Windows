@@ -1,5 +1,5 @@
 //! The machine-readable transition model of specification Section 14,
-//! transcribed from `rapp-state-machine-v26.8.17.135.yaml`.
+//! transcribed from `rapp-state-machine-v26.8.17.233.yaml`.
 //!
 //! The normative endpoint state is the product of three instance machines:
 //! pairing, session, and operation. Every transition carries a role, and an

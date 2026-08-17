@@ -177,7 +177,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ## Remote authorization (RAPP)
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
-Authorization Proxy Protocol, review draft 26.8.17.135, vendored verbatim
+Authorization Proxy Protocol, review draft 26.8.17.233, vendored verbatim
 under `docs/protocol/`. RAPP lets this Windows machine use an identity
 card held by the holder's phone: pairing starts from a high-entropy QR
 offer, every channel is a mutually authenticated Noise session, each

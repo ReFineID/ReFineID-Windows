@@ -8,9 +8,9 @@
     reason = "each conformance test crate uses the subset of helpers it needs"
 )]
 
-/// The vendored golden conformance corpus for protocol document 26.8.17.135.
+/// The vendored golden conformance corpus for protocol document 26.8.17.233.
 pub const CORPUS_JSON: &str =
-    include_str!("../../../../docs/protocol/vectors/rapp-v26.8.17.135.json");
+    include_str!("../../../../docs/protocol/vectors/rapp-v26.8.17.233.json");
 
 /// Decodes an even-length lowercase hex string from the corpus.
 pub fn decode_hex(value: &str) -> Vec<u8> {

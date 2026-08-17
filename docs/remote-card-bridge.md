@@ -42,7 +42,7 @@ is remote.
 ## Staging
 
 1. **Wire path** — done. `refineid-rapp-core` implements the requester
-   role against vendored draft 26.8.17.135 with the conformance corpus
+   role against vendored draft 26.8.17.233 with the conformance corpus
    replayed; `refineid-rapp pair-demo` proves pairing, sessions, and
    typed operations against a real phone from a terminal.
 2. **Durable pairing** — next. A `PairingStore` implementation over the

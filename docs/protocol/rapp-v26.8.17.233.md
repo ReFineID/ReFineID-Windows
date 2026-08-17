@@ -2,13 +2,13 @@
 
 Status: External-review draft  
 Intended status: Experimental  
-Document version: 26.8.17.135  
+Document version: 26.8.17.233  
 Supersedes: 26.8.16.85  
-Protocol wire version: 0.1-draft  
+Protocol wire version: 26.8  
 Date: 2026-08-17  
 Change controller: ReFineID project  
-Companion model: [RAPP state machine 26.8.17.135](rapp-state-machine-v26.8.17.135.yaml)  
-Conformance corpus: [RAPP vectors 26.8.17.135](vectors/rapp-v26.8.17.135.json)
+Companion model: [RAPP state machine 26.8.17.233](rapp-state-machine-v26.8.17.233.yaml)  
+Conformance corpus: [RAPP vectors 26.8.17.233](vectors/rapp-v26.8.17.233.json)
 
 ## Abstract
 
@@ -101,14 +101,14 @@ RAPP is not:
 The **Requester** asks for a typed credential operation. Examples include a
 browser authentication agent, a document-signing application, or an
 administrator requesting a PIN-management operation. The requester is the
-Noise initiator in RAPP 0.1.
+Noise initiator in RAPP 26.8.
 
 ### 3.2 Authorization Proxy
 
 The **Authorization Proxy** presents the operation to the user, obtains any
 required credential locally, communicates with the credential holder, and
 returns only the profile-defined result. A phone is the expected first proxy.
-The proxy is the Noise responder in RAPP 0.1.
+The proxy is the Noise responder in RAPP 26.8.
 
 ### 3.3 Credential Holder
 
@@ -233,7 +233,7 @@ account, hardware serial number, or globally stable device identifier.
 The wire version is a two-element `[major, minor]` array. A major-version
 difference is incompatible. A minor version may add non-critical fields only.
 Version and capability selection are authenticated as part of the Noise
-handshake transcript. RAPP 0.1 permits no silent downgrade and no 0-RTT
+handshake transcript. RAPP 26.8 permits no silent downgrade and no 0-RTT
 operation data.
 
 ## 7. Wire representation
@@ -615,7 +615,7 @@ the cryptographic entropy used by the protocol.
 ## 10. Session establishment
 
 A paired requester opens a new transport only after explicit user or
-application action. RAPP 0.1 does not automatically reconnect a closed
+application action. RAPP 26.8 does not automatically reconnect a closed
 session.
 
 1. The requester selects one mutually stored transport profile and initiates
@@ -659,7 +659,7 @@ session.
    protocol violation.
 
 No application operation is permitted during connection or authentication.
-RAPP 0.1 has no 0-RTT data, session resumption, connection migration, or
+RAPP 26.8 has no 0-RTT data, session resumption, connection migration, or
 mid-session transport fallback. A new transport requires a new session and
 fresh handshake.
 
@@ -1215,7 +1215,7 @@ machine-readable model and its generated tests:
 A successfully decrypted protocol violation proves that the peer holding the
 pair keys sent nonconforming traffic. The first such violation closes the
 session, moves the pairing immediately to `revoked`, destroys the pair keys,
-and requires a completely new manual QR pairing. RAPP 0.1 has no violation
+and requires a completely new manual QR pairing. RAPP 26.8 has no violation
 counter, grace event, automatic recovery, or restoration of revoked keys.
 
 Entering `revoked` sends, while an authenticated channel still exists, one
@@ -1272,7 +1272,7 @@ error-body = {
 }
 ```
 
-Registered `error` names in RAPP 0.1: `busy`, `unknown_operation`.
+Registered `error` names in RAPP 26.8: `busy`, `unknown_operation`.
 
 | Condition | Wire carrier | Session effect | Pairing effect | Credential attempts |
 | --- | --- | --- | --- | --- |
@@ -1416,7 +1416,7 @@ The relay MUST:
 - handle only encrypted frames and bounded routing metadata;
 - prevent one peer from enumerating other peers;
 - apply size, rate, lifetime, and connection limits before buffering;
-- avoid durable store-and-forward in RAPP 0.1;
+- avoid durable store-and-forward in RAPP 26.8;
 - ensure push notifications contain only an opaque wake hint;
 - delete queued ciphertext when a session closes or expires; and
 - document retained metadata and deletion periods.
@@ -1568,7 +1568,7 @@ Conformance evidence includes:
 - production-artifact inspection proving unsafe diagnostics are absent.
 
 The machine-readable corpus at
-`vectors/rapp-v26.8.17.135.json` fixes the deterministic CBOR,
+`vectors/rapp-v26.8.17.233.json` fixes the deterministic CBOR,
 envelope-rejection, sequence, downgrade, grant, hash, and mandatory Noise
 XXpsk3/KK known-answer vectors for this document version. Fields prefixed
 `test_only_` are public deterministic test material and MUST NOT be used as
@@ -1722,6 +1722,8 @@ destruction. This revision:
   storage protection of retained results.
 
 ## Appendix C. Changes from 26.8.16.85
+
+Revision 26.8.17.233 restores the durable pairing design. The 26.8.17.213 single-handshake collapse -- an ephemeral, liveness-bound experiment in which a pairing lived only for the life of one connection -- was reverted, returning to durable pairing with the Noise_KK reconnect handshake so a requester, including a credential-store extension running in its own process, reconnects to a stored pairing per use without a running app. The wire version is `[26, 8]`, raised from the pre-release `[0, 1]` and hashed into the handshake prologue, so the conformance corpus is regenerated under it; the pairing design is otherwise the prior durable revision.
 
 Draft 26.8.16.85 continued to evolve after its version was stamped, so the
 label briefly named more than one document. This revision collects that

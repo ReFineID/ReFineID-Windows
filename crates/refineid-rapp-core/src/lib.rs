@@ -1,13 +1,13 @@
 //! Remote Authorization Proxy Protocol (RAPP) requester core.
 //!
-//! This crate implements the requester role of RAPP draft 26.8.17.135 for the
+//! This crate implements the requester role of RAPP draft 26.8.17.233 for the
 //! Windows port: a Windows machine asks for typed credential operations, and
 //! an authorization proxy — the holder's phone — presents consent, talks to
 //! the identity card, and returns only the profile-defined result.
 //!
 //! The implementation tracks exactly the vendored specification revision in
-//! `docs/protocol/rapp-v26.8.17.135.md` and its machine-readable transition
-//! model `docs/protocol/rapp-state-machine-v26.8.17.135.yaml`. Section
+//! `docs/protocol/rapp-v26.8.17.233.md` and its machine-readable transition
+//! model `docs/protocol/rapp-state-machine-v26.8.17.233.yaml`. Section
 //! references in this crate's documentation cite that document. Per its
 //! Section 1, this is an experimental implementation of a review draft, not
 //! a production security claim.
@@ -34,8 +34,8 @@ pub mod store;
 pub mod stream;
 pub mod transport;
 
-/// The two-element wire version of RAPP 0.1 (specification Section 6).
-pub const WIRE_VERSION: (u64, u64) = (0, 1);
+/// The two-element wire version of RAPP 26.8 (specification Section 6).
+pub const WIRE_VERSION: (u64, u64) = (26, 8);
 
 /// The mandatory pairing handshake construction (specification Section 8.1).
 pub const PAIRING_SUITE: &str = "Noise_XXpsk3_25519_ChaChaPoly_SHA256";

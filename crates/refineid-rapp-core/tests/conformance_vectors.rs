@@ -26,7 +26,7 @@ use corpus_util::{CORPUS_JSON, decode_hex, fixed};
 /// The corpus self-description this replay is written against.
 const CORPUS_FORMAT: &str = "fi.refineid.rapp.conformance-v1";
 /// The protocol document revision the corpus is derived from.
-const PROTOCOL_DOCUMENT_VERSION: &str = "26.8.17.135";
+const PROTOCOL_DOCUMENT_VERSION: &str = "26.8.17.233";
 
 /// Vectors in the `deterministic_cbor` section.
 const DETERMINISTIC_CBOR_COUNT: usize = 15;
