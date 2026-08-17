@@ -85,36 +85,11 @@ internal sealed class Acknowledgement
     public bool Ok { get; init; }
 }
 
-/// <summary>One remote card reading: status, identity, and certificate size.</summary>
+/// <summary>One remote card reading: the holder identity.</summary>
 internal sealed class CardReading
 {
-    [JsonPropertyName("inspection")]
-    public CardInspection Inspection { get; init; } = new();
-
     [JsonPropertyName("identity")]
     public CardIdentity Identity { get; init; } = new();
-
-    [JsonPropertyName("authentication_certificate_der_len")]
-    public int AuthenticationCertificateDerLength { get; init; }
-}
-
-/// <summary>Counter-safe activation and retry state read from the card.</summary>
-internal sealed class CardInspection
-{
-    [JsonPropertyName("pin1_factory")]
-    public bool Pin1Factory { get; init; }
-
-    [JsonPropertyName("pin2_factory")]
-    public bool Pin2Factory { get; init; }
-
-    [JsonPropertyName("pin1_attempts")]
-    public byte? Pin1Attempts { get; init; }
-
-    [JsonPropertyName("pin2_attempts")]
-    public byte? Pin2Attempts { get; init; }
-
-    [JsonPropertyName("puk_attempts")]
-    public byte? PukAttempts { get; init; }
 }
 
 /// <summary>The public identity fields from the card.</summary>

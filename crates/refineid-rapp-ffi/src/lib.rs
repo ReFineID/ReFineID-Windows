@@ -48,7 +48,7 @@ use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RendezvousToken};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
@@ -141,18 +141,7 @@ struct AckDto {
 
 #[derive(Serialize)]
 struct CardReadDto {
-    inspection: InspectionDto,
     identity: IdentityDto,
-    authentication_certificate_der_len: usize,
-}
-
-#[derive(Serialize)]
-struct InspectionDto {
-    pin1_factory: bool,
-    pin2_factory: bool,
-    pin1_attempts: Option<u8>,
-    pin2_attempts: Option<u8>,
-    puk_attempts: Option<u8>,
 }
 
 #[derive(Serialize)]
@@ -631,22 +620,9 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         .connect(paired.pair_id, session_transport)
         .map_err(|error| ApiFailure::new("session_failed", format!("{error:?}")))?;
 
-    let inspection = match run_operation(paired, &mut session, &CardOperation::InspectCard)? {
-        CardOperationResult::Inspection {
-            pin1_factory,
-            pin2_factory,
-            pin1_attempts,
-            pin2_attempts,
-            puk_attempts,
-        } => InspectionDto {
-            pin1_factory,
-            pin2_factory,
-            pin1_attempts,
-            pin2_attempts,
-            puk_attempts,
-        },
-        _ => return Err(unexpected_result("inspect_card")),
-    };
+    // The requester screen shows only the holder identity, so the read is one
+    // operation and the phone reads the card once. Card status and the
+    // certificate bytes are separate operations added when a screen needs them.
     let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
         CardOperationResult::Identity {
             display_name,
@@ -657,26 +633,12 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         },
         _ => return Err(unexpected_result("read_identity")),
     };
-    let certificate_len = match run_operation(
-        paired,
-        &mut session,
-        &CardOperation::ReadCertificate {
-            kind: CertificateKind::Authentication,
-        },
-    )? {
-        CardOperationResult::Certificate(der) => der.len(),
-        _ => return Err(unexpected_result("read_certificate")),
-    };
 
     paired
         .requester
         .disconnect(&mut session, CloseReason::UserDisconnect);
 
-    Ok(CardReadDto {
-        inspection,
-        identity,
-        authentication_certificate_der_len: certificate_len,
-    })
+    Ok(CardReadDto { identity })
 }
 
 fn run_operation(
