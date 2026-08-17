@@ -21,11 +21,11 @@
 //! cardholder name and personal identifier) do cross in the JSON reply
 //! because the UI displays them, but they never enter a log.
 //!
-//! The requester is long-lived, so this ABI is handle-based: a caller begins
-//! a pairing, polls its state, confirms it, then reads the paired card. Each
-//! handle owns one background pairing thread and, after pairing, the live
-//! `Requester` whose device-only credential store persists the pairing so the
-//! minidriver can later load and use it behind this same ABI.
+//! This ABI is handle-based: a caller begins a pairing, polls its state,
+//! confirms it, then reads the paired card. Each handle owns one background
+//! pairing thread and, after pairing, the live `Requester`. The pairing lives
+//! only in that requester's memory and is gone when the handle ends: a pairing
+//! lasts the app session, never longer.
 
 #![expect(
     unsafe_code,
@@ -52,11 +52,10 @@ use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
-use refineid_rapp_core::store::{MemoryJournal, PairingStore};
+use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
-use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
 
 /// The one stream candidate this requester advertises.
@@ -81,9 +80,9 @@ const MAX_NAME_BYTES: usize = 256;
 /// Longest granted-profile JSON array accepted, in bytes.
 const MAX_GRANTED_BYTES: usize = 4_096;
 
-/// The requester engine specialised to the device-only credential-store
-/// pairing store and the in-memory operation journal.
-type StreamRequester = Requester<CredentialPairingStore, MemoryJournal>;
+/// The requester engine specialised to the in-memory stores: a pairing lasts
+/// only as long as this process, never longer.
+type StreamRequester = Requester<MemoryPairingStore, MemoryJournal>;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -214,22 +213,6 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
     // CString::into_raw in reply_json. Reconstructing it exactly once returns
     // the allocation to Rust.
     drop(unsafe { CString::from_raw(json) });
-}
-
-/// Forget every stored pairing, clearing the device-only credential.
-///
-/// This is the holder's local forget action: it destroys the stored pair
-/// keys so no session can be opened against them again. It does not notify the
-/// peer, matching the specification's `forget_pairing` rather than
-/// `local_revoke`. Clearing an empty store succeeds, so the action is
-/// idempotent.
-#[unsafe(no_mangle)]
-pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
-    reply_json(|| {
-        delete_pairing_set()
-            .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
-        Ok(AckDto { ok: true })
-    })
 }
 
 /// Begin a pairing: bind a listener, publish an offer, and start accepting.
@@ -433,14 +416,12 @@ fn begin_pairing(
         )
     })?;
 
-    let pairing_store = CredentialPairingStore::load()
-        .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let requester = Requester::new(
         RequesterConfig {
             display_name: name,
             platform: "Windows".to_owned(),
         },
-        pairing_store,
+        MemoryPairingStore::new(),
         MemoryJournal::new(),
     );
 

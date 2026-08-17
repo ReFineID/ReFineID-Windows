@@ -71,9 +71,6 @@ internal static partial class NativeRappService
     [LibraryImport(Library, EntryPoint = "refineid_rapp_cancel_pairing")]
     private static partial nint CancelPairingNative(ulong handle);
 
-    [LibraryImport(Library, EntryPoint = "refineid_rapp_forget_pairings")]
-    private static partial nint ForgetPairingsNative();
-
     [LibraryImport(Library, EntryPoint = "refineid_rapp_end_pairing")]
     private static partial void EndPairingNative(ulong handle);
 
@@ -130,13 +127,6 @@ internal static partial class NativeRappService
     internal static void CancelPairing(ulong handle) =>
         _ = Invoke(
             () => CancelPairingNative(handle),
-            RappJsonContext.Default.NativeEnvelopeAcknowledgement
-        );
-
-    /// <summary>Forgets every stored pairing, clearing the device-only credential.</summary>
-    internal static void ForgetPairings() =>
-        _ = Invoke(
-            () => ForgetPairingsNative(),
             RappJsonContext.Default.NativeEnvelopeAcknowledgement
         );
 
