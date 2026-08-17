@@ -24,9 +24,8 @@
 //! The requester is long-lived, so this ABI is handle-based: a caller begins
 //! a pairing, polls its state, confirms it, then reads the paired card. Each
 //! handle owns one background pairing thread and, after pairing, the live
-//! `Requester` whose in-memory store retains the pairing for the process
-//! lifetime. A durable, device-only pairing store is future work that will
-//! replace the in-memory store behind this same ABI.
+//! `Requester` whose device-only credential store persists the pairing so the
+//! minidriver can later load and use it behind this same ABI.
 
 #![expect(
     unsafe_code,
@@ -53,10 +52,11 @@ use refineid_rapp_core::operations::{CardOperation, CardOperationResult, Certifi
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
-use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
+use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
+use refineid_windows_credential_store::CredentialPairingStore;
 use serde::Serialize;
 
 /// The one stream candidate this requester advertises.
@@ -81,9 +81,9 @@ const MAX_NAME_BYTES: usize = 256;
 /// Longest granted-profile JSON array accepted, in bytes.
 const MAX_GRANTED_BYTES: usize = 4_096;
 
-/// The requester engine specialised to the process-lifetime in-memory
-/// stores. A durable pairing store will replace `MemoryPairingStore`.
-type StreamRequester = Requester<MemoryPairingStore, MemoryJournal>;
+/// The requester engine specialised to the device-only credential-store
+/// pairing store and the in-memory operation journal.
+type StreamRequester = Requester<CredentialPairingStore, MemoryJournal>;
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -418,12 +418,14 @@ fn begin_pairing(
         .local_port()
         .map_err(|error| ApiFailure::new("port_unavailable", format!("{error:?}")))?;
 
+    let pairing_store = CredentialPairingStore::load()
+        .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
     let requester = Requester::new(
         RequesterConfig {
             display_name: name,
             platform: "Windows".to_owned(),
         },
-        MemoryPairingStore::new(),
+        pairing_store,
         MemoryJournal::new(),
     );
 

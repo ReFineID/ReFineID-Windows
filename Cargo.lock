@@ -810,6 +810,7 @@ version = "26.8.10"
 dependencies = [
  "hex",
  "refineid-rapp-core",
+ "refineid-windows-credential-store",
  "serde",
  "serde_json",
 ]
