@@ -56,7 +56,7 @@ use refineid_rapp_core::store::{MemoryJournal, PairingStore};
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
-use refineid_windows_credential_store::CredentialPairingStore;
+use refineid_windows_credential_store::{CredentialPairingStore, delete_pairing_set};
 use serde::Serialize;
 
 /// The one stream candidate this requester advertises.
@@ -225,6 +225,22 @@ pub unsafe extern "C" fn refineid_rapp_string_free(json: *mut c_char) {
     // CString::into_raw in reply_json. Reconstructing it exactly once returns
     // the allocation to Rust.
     drop(unsafe { CString::from_raw(json) });
+}
+
+/// Forget every stored pairing, clearing the device-only credential.
+///
+/// This is the holder's local forget action: it destroys the stored pair
+/// keys so no session can be opened against them again. It does not notify the
+/// peer, matching the specification's `forget_pairing` rather than
+/// `local_revoke`. Clearing an empty store succeeds, so the action is
+/// idempotent.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_rapp_forget_pairings() -> *mut c_char {
+    reply_json(|| {
+        delete_pairing_set()
+            .map_err(|error| ApiFailure::new("forget_failed", format!("{error}")))?;
+        Ok(AckDto { ok: true })
+    })
 }
 
 /// Begin a pairing: bind a listener, publish an offer, and start accepting.

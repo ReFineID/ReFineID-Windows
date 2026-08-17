@@ -169,7 +169,18 @@ internal sealed partial class MainPage : Page
         this.HolderText.Visibility = Visibility.Collapsed;
         this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
         this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-        this.StatusInfoBar.IsOpen = false;
+
+        // Clearing the row is not enough now that a pairing is durable: drop
+        // the stored pair keys from the device-only credential too.
+        try
+        {
+            NativeRappService.ForgetPairings();
+            this.StatusInfoBar.IsOpen = false;
+        }
+        catch (NativeRappException error)
+        {
+            this.ShowError(error.Message);
+        }
     }
 
     private static string? LocalAdvertiseEndpoint()
