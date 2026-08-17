@@ -27,6 +27,7 @@ pub mod message;
 pub mod noise;
 pub mod offer;
 pub mod operations;
+pub mod persistence;
 pub mod profiles;
 pub mod states;
 pub mod store;
