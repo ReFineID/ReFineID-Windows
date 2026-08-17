@@ -7,28 +7,34 @@ Before submitting:
 
 ```powershell
 cargo fmt --all -- --check
+dotnet tool restore
+dotnet csharpier check .
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p refineid-lib-core
-dotnet format apps/ReFineID/ReFineID.csproj --verify-no-changes
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build.ps1 -Architecture x64,arm64
 ```
 
+Formatting is owned by dedicated tools: rustfmt for Rust and CSharpier for C#,
+XAML, and the project files. CSharpier is pinned in `.config/dotnet-tools.json`
+and its style is fixed, so `dotnet csharpier format .` fixes any formatting the
+check reports.
+
 ## Commit gate
 
-`.github/workflows/ci.yml` is the authoritative gate: it runs formatting,
-lint, tests, and the requester build on a Windows runner, and every pull
-request must pass it.
+`.github/workflows/ci.yml` is the authoritative push gate: it runs formatting,
+lint, tests, and the requester build on a Windows runner, and `main` is
+protected so nothing merges until it passes.
 
-Enable the local pre-commit hook once per clone so a badly formatted change
-is caught before it leaves the machine:
+Enable the local pre-commit hook once per clone so a badly formatted change is
+caught before it leaves the machine:
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
-The hook always checks `cargo fmt`. `cargo clippy` and `dotnet format` need
-the Windows target and workload, so the hook runs them only on Windows; on
-other hosts CI is what enforces them.
+Both formatters are cross-platform, so the hook checks `cargo fmt` and
+`dotnet csharpier check` on every host. `cargo clippy` needs the Windows-only
+crates and the build needs Windows, so CI enforces those.
 
 Rules:
 

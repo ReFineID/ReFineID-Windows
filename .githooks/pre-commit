@@ -1,33 +1,25 @@
 #!/bin/sh
 # ReFineID Windows commit gate.
 #
-# Rejects a commit that would fail the formatting and lint contract in
-# CONTRIBUTING.md. Enable it once per clone with:
+# Rejects a commit that would fail the formatting contract in CONTRIBUTING.md.
+# Enable it once per clone with:
 #
 #     git config core.hooksPath .githooks
 #
-# The Windows Card Module and credential-store crates only build against the
-# Windows target, and the WinUI requester needs the Windows workload, so clippy
-# and dotnet format can only run on Windows. Rust formatting is toolchain-only
-# and runs everywhere. CI (.github/workflows/ci.yml) is the authoritative gate
-# that runs the full set on every push and pull request. Bypass in a genuine
-# emergency with `git commit --no-verify`.
+# Formatting is cheap and cross-platform, so both formatters run here on every
+# host: rustfmt for Rust and CSharpier for C#, XAML, and the project files. The
+# heavier semantic checks -- clippy (needs the Windows-only crates) and the
+# WinUI build -- run in CI (.github/workflows/ci.yml), which is the
+# authoritative push gate. Bypass in a genuine emergency with
+# `git commit --no-verify`.
 
 set -e
 
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check
 
-case "$(uname -s)" in
-  MINGW* | MSYS* | CYGWIN* | Windows_NT)
-    echo "pre-commit: cargo clippy --workspace --all-targets -- -D warnings"
-    cargo clippy --workspace --all-targets -- -D warnings
-    echo "pre-commit: dotnet format --verify-no-changes"
-    dotnet format apps/ReFineID/ReFineID.csproj --verify-no-changes
-    ;;
-  *)
-    echo "pre-commit: host is $(uname -s); clippy and dotnet format need Windows -- CI enforces them"
-    ;;
-esac
+echo "pre-commit: dotnet csharpier check"
+dotnet tool restore >/dev/null
+dotnet csharpier check .
 
-echo "pre-commit: ok"
+echo "pre-commit: ok (clippy and the WinUI build run in CI)"

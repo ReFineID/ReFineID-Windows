@@ -33,8 +33,15 @@ jobs:
         with:
           dotnet-version: "10.0.x"
 
+      # Cheap, source-only formatting checks fail fast before any build. rustfmt
+      # covers Rust; CSharpier covers C#, XAML, and the project files.
       - name: Rust formatting
         run: cargo fmt --all --check
+
+      - name: C# and XAML formatting
+        run: |
+          dotnet tool restore
+          dotnet csharpier check .
 
       - name: Rust lint
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -48,16 +55,10 @@ jobs:
       - name: Build RAPP bridge
         run: cargo build -p refineid-rapp-ffi
 
-      - name: Restore requester
-        run: dotnet restore apps/ReFineID/ReFineID.csproj -p:Platform=x64
-
-      - name: C# formatting
-        run: dotnet format apps/ReFineID/ReFineID.csproj --verify-no-changes --no-restore
-
       # TreatWarningsAsErrors and EnforceCodeStyleInBuild are set in the
-      # project, so a clean build is itself a lint gate.
+      # project, so a clean build is itself the analyzer gate.
       - name: Build requester
         run: >-
           dotnet build apps/ReFineID/ReFineID.csproj
-          -c Debug -p:Platform=x64 -p:SkipRustBuild=true --no-restore
+          -c Debug -p:Platform=x64 -p:SkipRustBuild=true
           -p:WindowsPackageType=None -p:EnableMsixTooling=false
