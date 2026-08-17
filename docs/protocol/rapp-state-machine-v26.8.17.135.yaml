@@ -1,6 +1,6 @@
 protocol: RAPP
-document_version: "26.8.16.85"
-supersedes: "26.8.16.84"
+document_version: "26.8.17.135"
+supersedes: "26.8.16.85"
 wire_version: "0.1-draft"
 status: external-review
 
@@ -29,8 +29,8 @@ semantics:
   actions_are_ordered: true
   event_precedence: >
     Racing events are processed in the order of the prose Section 14.7: local
-    forget, revocation, quarantine, or security shutdown; authenticated peer
-    revocation or quarantine notice; credential rejection or card ambiguity;
+    forget, revocation, or security shutdown; authenticated peer revocation
+    notice; credential rejection or card ambiguity;
     authenticated peer close; transport loss, integrity failure, or liveness
     deadline; operation transitions; liveness traffic.
 
@@ -38,7 +38,6 @@ constants:
   max_active_operations: 1
   minimum_remaining_attempts: 3
   maximum_credential_transmissions_per_operation: 1
-  violation_strike_limit: 3
   candidate_failure_hint_threshold: 3
   offer_ttl_max_ms: 180000
 
@@ -54,9 +53,7 @@ guards:
     payloads
   granted_sets_equal: "both pairing.confirm granted_profiles sets are equal"
   pairing_paired: "pairing is paired_disconnected or paired_connected"
-  initiation_permitted: >
-    a user action, or an application action when the previous close for this
-    pairing did not record the requires-user-intent flag
+  initiation_permitted: "an explicit user action or an explicit application action"
   ready_parameters_match: "received session.ready parameters equal the local view"
   deadline_not_expired: "the liveness hard deadline has not passed"
   another_session_live: "a session for this pairing is healthy or checking"
@@ -97,7 +94,6 @@ actions:
   show_checking: "expose the Checking connection visible state"
   show_disconnecting: "expose the Disconnecting visible state"
   show_connection_stopped: "expose the Connection stopped visible state"
-  show_quarantined: "expose the Pairing quarantined visible state"
   show_revoked: "expose the Pairing revoked visible state"
   close_session: "raise close_requested_by_pairing for the live session instance"
   destroy_pair_keys: "erase pair static keys from the platform key store"
@@ -119,14 +115,10 @@ actions:
   start_backoff_and_deadline: "start liveness backoff with jitter and the hard deadline"
   reset_backoff: "clear liveness backoff state"
   record_peer_close_reason: "journal the received close reason"
-  record_violation_strike: >
-    add one persistent strike to the pairing, at most one per session; at
-    violation_strike_limit raise violation_strike_limit_reached
   count_candidate_failure_hint: >
     count consecutive candidate authentication failures; at
     candidate_failure_hint_threshold suggest re-pairing without altering
     stored keys
-  set_requires_user_intent: "record that the next session needs explicit user intent"
   note_close_notice_impossible: "record that no close notice can be sent"
   proceed_without_close_notice: "continue closing without further sends"
   abort_candidate: "cancel transport establishment"
@@ -153,6 +145,7 @@ actions:
   send_result_ambiguous_best_effort: "send operation.result status ambiguous if the channel is usable"
   request_session_close: "raise local_close_requested for the session"
   request_session_close_credential_rejected: "raise credential_rejected for the session"
+  revoke_pair_after_credential_rejection: "durably destroy pair keys and write a tombstone after sealing the bounded credential_rejected result, or immediately when receiving that authenticated result"
   request_session_close_ambiguous: "raise card_completion_ambiguous for the session"
   send_operation_cancel: "send operation.cancel with the request_hash echo"
   durably_write_commit_before_transmission: "write the non-secret commit record before any transmission"
@@ -192,7 +185,6 @@ pairing:
     - confirming
     - paired_disconnected
     - paired_connected
-    - quarantined
     - revoked
   notes:
     - "forget during offer, handshake, or confirmation is expressed by offer_expired_or_cancelled and denied_aborted_or_timed_out"
@@ -276,10 +268,10 @@ pairing:
       to: unpaired
       actions: [close_session, destroy_pair_keys, destroy_relay_tokens, clear_pair_metadata]
     - from: paired_connected
-      event: violation_strike_limit_reached   # produced by record_violation_strike
+      event: authenticated_protocol_violation
       role: both
-      to: quarantined
-      actions: [send_close_best_effort, close_session, destroy_pair_keys, show_quarantined]
+      to: revoked
+      actions: [send_close_best_effort, close_session, destroy_pair_keys, show_revoked]
     - from: paired_connected
       event: local_revoke
       role: both
@@ -293,16 +285,10 @@ pairing:
       to: revoked
       actions: [destroy_pair_keys, show_revoked]
     - from: paired_connected
-      event: peer_revocation_notice     # produced by peer_close_received with reason pairing_revoked or pairing_quarantined
+      event: peer_revocation_notice     # produced by peer_close_received with reason pairing_revoked or protocol_violation
       role: both
       to: revoked
       actions: [record_peer_initiated, close_session, destroy_pair_keys, show_revoked]
-    - from: quarantined
-      event: forget_pairing
-      role: both
-      guard: local_user_action
-      to: unpaired
-      actions: [clear_residual_pair_record]
     - from: revoked
       event: forget_pairing
       role: both
@@ -393,7 +379,7 @@ session:
       event: authenticated_protocol_violation
       role: both
       to: closing
-      actions: [record_violation_strike, send_close_best_effort, show_disconnecting]
+      actions: [send_close_best_effort, show_disconnecting]
     - from: healthy
       event: liveness_missed
       role: both
@@ -434,7 +420,7 @@ session:
       event: credential_rejected        # produced by operation action request_session_close_credential_rejected
       role: proxy
       to: closing
-      actions: [set_requires_user_intent, send_close_best_effort, show_disconnecting]
+      actions: [destroy_pair_keys, show_revoked, send_close_best_effort, show_disconnecting]
     - from: [healthy, checking]
       event: card_completion_ambiguous
       role: proxy
@@ -446,7 +432,7 @@ session:
       to: closing
       actions: [note_close_notice_impossible, show_disconnecting]
     - from: [healthy, checking]
-      event: session_integrity_failed   # policy class 2; no strike, no pairing effect
+      event: session_integrity_failed   # policy class 2; no pairing effect
       role: both
       to: closing
       actions: [note_close_notice_impossible, show_disconnecting]
@@ -454,7 +440,7 @@ session:
       event: authenticated_protocol_violation   # policy class 4
       role: both
       to: closing
-      actions: [record_violation_strike, send_close_best_effort, show_disconnecting]
+      actions: [send_close_best_effort, show_disconnecting]
     - from: [healthy, checking]
       event: close_requested_by_pairing # produced by pairing actions and rule X-01
       role: both
@@ -562,7 +548,7 @@ operation:
       event: invalid_can_or_pin1_or_pin2
       role: proxy
       to: credential_rejected
-      actions: [clear_all_active_credentials, remove_rejected_credential_and_derived_state, send_result_credential_rejected_best_effort, request_session_close_credential_rejected]
+      actions: [clear_all_active_credentials, remove_rejected_credential_and_derived_state, send_result_credential_rejected_best_effort, revoke_pair_after_credential_rejection, request_session_close_credential_rejected]
     - from: awaiting_consent
       event: safe_reads_complete
       role: proxy
@@ -617,7 +603,7 @@ operation:
       event: invalid_can_or_pin1_or_pin2
       role: proxy
       to: credential_rejected
-      actions: [clear_all_active_credentials, remove_rejected_credential_and_derived_state, send_result_credential_rejected_best_effort, request_session_close_credential_rejected]
+      actions: [clear_all_active_credentials, remove_rejected_credential_and_derived_state, send_result_credential_rejected_best_effort, revoke_pair_after_credential_rejection, request_session_close_credential_rejected]
     - from: executing
       event: card_policy_rejection
       role: proxy
@@ -700,7 +686,7 @@ operation:
       event: result_credential_rejected_received
       role: requester
       to: credential_rejected
-      actions: [journal_credential_rejected]
+      actions: [journal_credential_rejected, revoke_pair_after_credential_rejection]
     - from: committed
       event: result_completed_received
       role: requester
@@ -736,7 +722,6 @@ unexpected_input_policy:
       a frame on an authenticated session that fails authenticated decryption
       or framing
     handling: [raise_session_integrity_failed]
-    strike: false
     pairing_effect: none
   - class: stale_reference_race
     applies: >
@@ -744,7 +729,6 @@ unexpected_input_policy:
       operation_id, a duplicate commit whose hash matches the committed
       record, or a pong whose challenge matches no outstanding ping
     handling: [discard_input, send_error_unknown_operation_if_useful]
-    strike: false
     pairing_effect: none
   - class: authenticated_protocol_violation
     applies: >
@@ -752,25 +736,22 @@ unexpected_input_policy:
       session_id violation, parameter-echo mismatch, or no legal transition
       and no stale-reference classification
     handling: [raise_authenticated_protocol_violation]
-    strike: true
     pairing_effect: >
-      one strike; quarantined at violation_strike_limit. On the pairing
-      channel before a pairing is stored, the attempt aborts via
-      denied_aborted_or_timed_out and nothing is recorded
+      immediate revocation of a stored pairing. On the pairing channel before
+      a pairing is stored, the attempt aborts via denied_aborted_or_timed_out
+      and nothing is recorded
   - class: local_internal_fault
     applies: "a local invariant failure inside the RAPP implementation"
     handling: [raise_local_security_shutdown]
-    strike: false
     pairing_effect: none
   - class: traffic_after_closed
     applies: "any frame for a closed or unknown session"
     handling: [discard_without_response]
-    strike: false
     pairing_effect: none
 
 cross_component_rules:
   - id: X-01
-    when: pairing_leaves_paired_by_forget_quarantine_or_revocation_with_live_session
+    when: pairing_leaves_paired_by_forget_or_revocation_with_live_session
     require: session_receives_close_requested_by_pairing
   - id: X-02
     when: session_enters_closing_with_operation_in_requested_awaiting_consent_or_prepared
@@ -786,7 +767,7 @@ cross_component_rules:
     require: operation_receives_session_closed_before_ack
   - id: X-06
     when: operation_enters_credential_rejected
-    require: session_enters_closing_pairing_remains_paired_and_user_intent_required_for_next_session
+    require: session_enters_closing_and_both_peers_durably_revoke_the_pair_on_the_first_incident
   - id: X-07
     when: operation_enters_ambiguous
     require: automatic_retry_is_permanently_false
@@ -794,7 +775,7 @@ cross_component_rules:
     when: operation_admission
     require: pairing_paired_connected_and_session_healthy_and_no_active_operation
   - id: X-09
-    when: pairing_enters_quarantined_or_revoked
+    when: pairing_enters_revoked
     require: one_best_effort_authenticated_close_notice_before_key_destruction
 
 invariants:
@@ -811,7 +792,7 @@ invariants:
   - id: INV-06
     statement: ambiguous_completion_never_retried_automatically
   - id: INV-07
-    statement: quarantined_or_revoked_keys_never_restored_automatically
+    statement: revoked_keys_never_restored_automatically
   - id: INV-08
     statement: version_suite_grants_and_transport_are_transcript_bound
   - id: INV-09
@@ -833,4 +814,4 @@ invariants:
   - id: INV-17
     statement: credential_rejection_never_auto_reconnects_or_repeats
   - id: INV-18
-    statement: unattributable_input_never_quarantines_or_revokes_pairing
+    statement: unattributable_input_never_revokes_pairing

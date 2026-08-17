@@ -1,12 +1,14 @@
 # Remote Authorization Proxy Protocol (RAPP)
 
 Status: External-review draft  
-Document version: 26.8.16.85  
-Supersedes: 26.8.16.84  
+Intended status: Experimental  
+Document version: 26.8.17.135  
+Supersedes: 26.8.16.85  
 Protocol wire version: 0.1-draft  
-Date: 2026-08-16  
+Date: 2026-08-17  
 Change controller: ReFineID project  
-Companion model: [RAPP state machine 26.8.16.85](rapp-state-machine-v26.8.16.85.yaml)
+Companion model: [RAPP state machine 26.8.17.135](rapp-state-machine-v26.8.17.135.yaml)  
+Conformance corpus: [RAPP vectors 26.8.17.135](vectors/rapp-v26.8.17.135.json)
 
 ## Abstract
 
@@ -28,7 +30,7 @@ prohibits automatic recovery.
 
 Network faults that cannot be attributed to the authenticated peer close at
 most the current session. Destruction of a stored pairing requires either an
-explicit local decision or repeated violations proven to originate from the
+explicit local decision or a protocol violation proven to originate from the
 authenticated peer.
 
 This document defines the roles, trust boundaries, wire representation,
@@ -333,7 +335,6 @@ The following named limits apply:
 | `MAX_TRANSPORT_CANDIDATES` | 8 |
 | `MAX_ACTIVE_OPERATIONS` | 1 per proxy |
 | `OFFER_TTL_MAX` | 180,000 ms |
-| `VIOLATION_STRIKE_LIMIT` | 3 strikes per pairing |
 
 `MAX_FRAME_PLAINTEXT` equals the maximum Noise transport payload, so one
 envelope always fits one frame. Credential profiles SHOULD transport digests
@@ -431,13 +432,20 @@ Let `h` be the Noise handshake hash of a completed handshake as defined by the
 Noise framework. Both peers derive, in this order:
 
 ```text
-session_id  = first 16 bytes of SHA-256("RAPP-session-id-v1" || h)
-pair_id     = first 16 bytes of SHA-256("RAPP-pair-id-v1" || h)
+session_id       = first 16 bytes of SHA-256("RAPP-session-id-v1" || h)
+pair_id          = first 16 bytes of SHA-256("RAPP-pair-id-v1" || h)
+rendezvous_token = first 16 bytes of SHA-256("RAPP-rendezvous-v1" || h)
 ```
 
 `session_id` is derived from every completed handshake, including the pairing
 handshake, and scopes the envelope of that channel. `pair_id` is derived only
 from the pairing handshake and permanently names the stored relationship.
+`rendezvous_token` is likewise derived only from the pairing handshake and is
+stored beside the pairing for transport profiles that need pair-specific
+rendezvous (Sections 16.1 and 17). It exists so that a transport can name a
+pairing on the wire without ever exposing `pair_id`, which remains a local
+identifier; the two values are computationally unlinkable without `h`.
+Destroying a pairing destroys its rendezvous token.
 Because `h` mixes the prologue, which contains `offer_hash` over content that
 never crosses the network, a network observer cannot compute either value.
 
@@ -469,8 +477,8 @@ request-hash-preimage = [
 
 Pairing secrets and handshake ephemeral keys MUST be destroyed immediately
 after their protocol purpose ends. Session traffic keys MUST be destroyed on
-close, quarantine, revocation, process termination, logout, or device lock.
-Pairing-key deletion is required on forget, quarantine, or revocation, after
+close, revocation, process termination, logout, or device lock.
+Pairing-key deletion is required on forget or revocation, after
 the best-effort peer notice of Section 14.6 has been attempted. A result
 retained under Section 12.5 is protected by local platform storage encryption,
 never by session keys. Secure deletion on flash storage is best effort;
@@ -607,15 +615,24 @@ the cryptographic entropy used by the protocol.
 ## 10. Session establishment
 
 A paired requester opens a new transport only after explicit user or
-application action, subject to the user-intent rule of Section 13.4. RAPP 0.1
-does not automatically reconnect a closed session.
+application action. RAPP 0.1 does not automatically reconnect a closed
+session.
 
-1. The requester selects one mutually stored transport profile and connects.
-2. The proxy associates the incoming connection with a stored pairing through
-   the transport's pair-specific rendezvous (for example, its relay token or
-   candidate parameters). If the transport cannot indicate the pairing, the
-   proxy MAY trial-process the first handshake message against each stored
-   pairing; exactly one can authenticate.
+1. The requester selects one mutually stored transport profile and initiates
+   the session over it. Which endpoint opens the underlying connection is a
+   property of the transport profile (Section 16): the requester dials on a
+   profile whose stored candidate names a proxy-side rendezvous, and it
+   accepts on a profile whose stored candidate names a requester-side
+   listener. Logical Noise roles are unaffected by connection direction.
+2. The accepting endpoint associates the connection with a stored pairing
+   through the transport's pair-specific rendezvous (for example, its relay
+   token, candidate parameters, or rendezvous preamble). If the transport
+   cannot indicate the pairing and the accepting endpoint is the proxy, it
+   MAY trial-process the first handshake message against each stored
+   pairing; exactly one can authenticate. An accepting requester has no
+   trial-processing option, because the requester sends the first handshake
+   message; its transport profile MUST indicate the pairing before the
+   handshake begins.
 3. The peers run the mandatory `Noise_KK` handshake with their pair-specific
    static keys, fresh ephemeral keys, the session prologue of Section 8.3, and
    empty handshake payloads.
@@ -665,14 +682,13 @@ close-reason =
   / "credential_rejected"
   / "protocol_violation"
   / "pairing_revoked"
-  / "pairing_quarantined"
   / "shutdown"
 ```
 
 A peer that receives `session.close` enters `closing`, stops sending
 application messages, and completes its own close. The reasons
-`pairing_revoked` and `pairing_quarantined` additionally carry the pairing
-notice of Section 14.6.
+`pairing_revoked` and `protocol_violation` additionally carry the pairing
+revocation notice of Section 14.6.
 
 ## 11. Visible liveness
 
@@ -686,7 +702,6 @@ active:
 - Checking connection
 - Disconnecting
 - Connection stopped
-- Pairing quarantined
 - Pairing revoked
 
 Color and animation MAY supplement but MUST NOT be the only distinction.
@@ -924,8 +939,76 @@ report, production log, or operation journal.
 | `fi.eid.activation.v1` | activate factory PIN 1 or PIN 2 | one PIN change per operation |
 | `fi.eid.pin-management.v1` | change or reset one PIN | one PIN change or PUK reset |
 
-These names reserve design space; their card-specific payloads require a
-separate reviewed profile specification.
+The card-status, authentication, and document-signing actions are defined
+below. Activation and PIN-management payloads remain reserved design space and
+require a separate reviewed profile specification before use.
+
+#### 13.2.1 Registered actions and payloads
+
+The initial action registry is closed:
+
+| Action | Owning profile | Consequential command |
+| --- | --- | --- |
+| `inspect_card` | `fi.eid.card-status.v1` | none |
+| `read_identity` | `fi.eid.card-status.v1` | none |
+| `read_certificate` | key-matching profile, below | none |
+| `browser_authenticate` | `fi.eid.authentication.v1` | PIN 1 verify and private-key operation |
+| `sign_document` | `fi.eid.document-signing.v1` | PIN 2 verify and private-key operation |
+
+`inspect_card` and `read_identity` carry empty context and payload maps.
+`read_certificate` carries exactly one payload field, `kind`, whose registered
+values are `authentication` and `signature`. The action is owned by the
+profile whose key the certificate serves: reading the authentication
+certificate requires the `fi.eid.authentication.v1` grant, and reading the
+signature certificate requires the `fi.eid.document-signing.v1` grant, so a
+requester never learns a certificate whose key it could not ask to use. All
+three reads are safe reads and omit prepare and commit (Section 12.2).
+
+`browser_authenticate` under `fi.eid.authentication.v1` carries:
+
+| Map | Field | Type | Meaning |
+| --- | --- | --- | --- |
+| context | `origin` | bounded non-empty text | relying-party origin displayed by the authorizer |
+| payload | `key_profile` | registered text | expected authentication-certificate key profile |
+| payload | `algorithm` | registered text | exact signature algorithm |
+| payload | `digest` | bytes | already-hashed challenge of the registered length |
+
+`sign_document` under `fi.eid.document-signing.v1` has the same payload fields
+and carries bounded non-empty `document_name` in its context map instead of
+`origin`. Documents and unhashed browser input MUST NOT cross RAPP.
+
+The initial `key_profile` registry is closed:
+
+| Name | Expected key |
+| --- | --- |
+| `ecdsa_p256` | ECDSA P-256 |
+| `ecdsa_p384` | ECDSA P-384 |
+| `rsa_2048` | RSA 2048-bit |
+| `rsa_3072` | RSA 3072-bit |
+
+The initial `algorithm` registry is also closed:
+
+| Name | Digest length | Compatible key profiles |
+| --- | ---: | --- |
+| `ecdsa_sha224` | 28 | `ecdsa_p256`, `ecdsa_p384` |
+| `ecdsa_sha256` | 32 | `ecdsa_p256`, `ecdsa_p384` |
+| `ecdsa_sha384` | 48 | `ecdsa_p256`, `ecdsa_p384` |
+| `ecdsa_sha512` | 64 | `ecdsa_p256`, `ecdsa_p384` |
+| `rsa_pkcs1_sha256` | 32 | `rsa_2048`, `rsa_3072` |
+| `rsa_pkcs1_sha384` | 48 | `rsa_2048`, `rsa_3072` |
+| `rsa_pkcs1_sha512` | 64 | `rsa_2048`, `rsa_3072` |
+| `rsa_pss_sha256` | 32 | `rsa_2048`, `rsa_3072` |
+
+A receiver MUST reject an unknown value, an incorrect digest length, an
+incompatible key/algorithm combination, an extra field, or a missing field.
+The expected profile is an authenticated requester assertion, not trusted card
+state: before approval, the proxy MUST independently resolve the selected card
+certificate and require it to match `key_profile`. A mismatch is terminal and
+MUST NOT transmit a PIN verification or private-key command.
+
+All four fields participate in the deterministic request commitment. Changing
+the displayed context, key profile, algorithm, or digest therefore changes the
+request hash and invalidates any approval bound to the previous request.
 
 ### 13.3 Retry protection
 
@@ -966,14 +1049,14 @@ command — the proxy MUST:
 5. for invalid CAN, remove stored CAN and card-derived identity state;
 6. send only the profile's bounded `credential_rejected` result when the
    authenticated channel is still usable;
-7. move the RAPP session immediately to `closing`; and
-8. record that the next session for this pairing requires explicit user
-   intent.
+7. durably destroy the pairing keys and write a pairing tombstone after that
+   bounded result has been sealed; and
+8. move the RAPP session immediately to `closing`.
 
-The user-intent record of step 8 is checked by session admission: after a
-close caused by credential rejection, quarantine, revocation, or an
-authenticated protocol violation, a new session MUST NOT be opened by
-application-initiated action alone.
+The authenticated requester that receives `credential_rejected` MUST also
+durably destroy its pairing keys and write a tombstone before reporting the
+terminal result. Recovery requires a new manual pairing ceremony; there is no
+automatic reconnect or two-incident grace policy.
 
 PIN 2 is never cached. A PIN 2 rejection still clears the entry and all other
 credential fields in the active flow. A PIN 1 rejection destroys any PIN 1
@@ -981,8 +1064,7 @@ convenience entry. The authorization proxy MAY show the locally known retry
 count; the requester receives only information allowed by the profile.
 
 Card rejection is not, by itself, evidence that the paired network peer is
-malicious. The device pairing therefore remains `paired_disconnected` and
-accrues no violation strike.
+malicious. The device pairing therefore remains `paired_disconnected`.
 
 ### 13.5 Activation and partial completion
 
@@ -1049,14 +1131,12 @@ journal.
 | `confirming` | authenticated exchange awaits both approvals |
 | `paired_disconnected` | durable pairing exists; no healthy session |
 | `paired_connected` | durable pairing exists with a healthy/checking session |
-| `quarantined` | repeated authenticated violations reached the strike limit |
 | `revoked` | the pairing was deliberately terminated, locally or by authenticated peer notice |
 
-`quarantined` and `revoked` are fail-stop states. Existing keys cannot be
-reactivated. The user may forget the record and perform a completely new QR
-pairing with new keys. Unauthenticated traffic, failed handshakes, and
-frames that fail authenticated decryption can never quarantine or revoke a
-stored pairing.
+`revoked` is a fail-stop state. Existing keys cannot be reactivated. The user
+may forget the record and perform a completely new QR pairing with new keys.
+Unauthenticated traffic, failed handshakes, and frames that fail authenticated
+decryption can never revoke a stored pairing.
 
 ### 14.3 Session states
 
@@ -1071,8 +1151,8 @@ stored pairing.
 | `closed` | terminal session record; no traffic |
 
 Ordinary EOF, transport failure, liveness timeout, or decrypt failure closes
-only the session. An authenticated protocol violation additionally records a
-violation strike against the pairing (Section 14.6). A peer `session.close`
+only the session. The first authenticated protocol violation immediately
+revokes the pairing (Section 14.6). A peer `session.close`
 is consumed from every post-handshake state: `authenticating`, `healthy`,
 `checking`, and `closing`.
 
@@ -1113,7 +1193,7 @@ machine-readable model and its generated tests:
 2. **Established-channel integrity failure** — a frame on an authenticated
    session that fails authenticated decryption or framing: close the session
    as `session_integrity_failed`. This is network-attributable (Section 7.3)
-   and carries no strike and no pairing effect.
+   and has no pairing effect.
 3. **Stale-reference race** — a successfully decrypted operation message for
    an unknown or terminal `operation_id`, a duplicate commit matching the
    committed hash, or a pong whose challenge matches no outstanding ping:
@@ -1121,30 +1201,30 @@ machine-readable model and its generated tests:
    useful; no state change.
 4. **Authenticated protocol violation** — a successfully decrypted message
    with a schema violation, sequence violation, parameter-echo mismatch, or
-   no legal transition outside class 3: close the session, classify the
-   active operation per Section 14.7, and record one violation strike
-   (Section 14.6). On the pairing channel, before a pairing is stored, the
-   violation instead aborts the pairing attempt and records nothing.
+   no legal transition outside class 3: close the session, classify the active
+   operation per Section 14.7, immediately revoke the pairing, destroy its
+   keys, and require a new manual pairing (Section 14.6). On the pairing
+   channel, before a pairing is stored, the violation instead aborts the
+   pairing attempt and records nothing.
 5. **Local internal fault** — stop local RAPP, destroy session material, and
    classify a committed operation as ambiguous without blaming the peer.
 6. **Traffic after `closed`** — discard without response.
 
-### 14.6 Violation strikes, quarantine, and revocation
+### 14.6 Immediate revocation and peer notice
 
-An authenticated protocol violation proves that the peer holding the pair
-keys sent nonconforming traffic, but one occurrence is more often a defect
-than an attack. Each violation closes the session and records one persistent
-strike on the pairing; at most one strike is recorded per session, and
-strikes never decrease automatically in RAPP 0.1. Reaching
-`VIOLATION_STRIKE_LIMIT` moves the pairing to `quarantined`.
+A successfully decrypted protocol violation proves that the peer holding the
+pair keys sent nonconforming traffic. The first such violation closes the
+session, moves the pairing immediately to `revoked`, destroys the pair keys,
+and requires a completely new manual QR pairing. RAPP 0.1 has no violation
+counter, grace event, automatic recovery, or restoration of revoked keys.
 
-Entering `quarantined` or `revoked` sends, while an authenticated channel
-still exists, one best-effort `session.close` with reason
-`pairing_quarantined` or `pairing_revoked`, and then destroys the pair keys.
-A peer receiving either reason on an authenticated channel marks its own
-pairing `revoked`, records that the peer initiated it, closes the session,
-and destroys its keys; the pairing is dead on both sides and both users see
-why. When no channel exists at quarantine or revocation time, the other peer
+Entering `revoked` sends, while an authenticated channel still exists, one
+best-effort `session.close` with reason `pairing_revoked` or
+`protocol_violation`, and then destroys the pair keys. A peer receiving either
+reason on an authenticated channel marks its own pairing `revoked`, records
+that the peer initiated it, closes the session, and destroys its keys; the
+pairing is dead on both sides and both users see why. When no channel exists at
+revocation time, the other peer
 discovers the loss as failed session handshakes: after three consecutive
 candidate authentication failures for one pairing an implementation SHOULD
 suggest re-pairing, while leaving stored keys untouched per invariant
@@ -1158,8 +1238,8 @@ destroys keys; the peer discovers the loss as described.
 
 When events race, implementations process them in this order:
 
-1. local forget, revocation, quarantine entry, or process security shutdown;
-2. authenticated peer revocation or quarantine notice;
+1. local forget, revocation, or process security shutdown;
+2. authenticated peer revocation notice;
 3. credential rejection or card-command ambiguity;
 4. authenticated peer close;
 5. transport loss, integrity failure, or liveness deadline;
@@ -1203,18 +1283,16 @@ Registered `error` names in RAPP 0.1: `busy`, `unknown_operation`.
 | `unknown_operation` | `error` | remains healthy | none | none |
 | `busy` | `error`, then close | new candidate session closes | none | none |
 | `retry_policy_refused` | result status `rejected` | closes explicitly | none | none |
-| `credential_rejected` | result status `credential_rejected` | closes immediately | none; next session needs user intent | at most one consumed |
+| `credential_rejected` | result status `credential_rejected` | closes immediately | revoked immediately on both peers | at most one consumed |
 | `card_removed_before_transmit` | result status `cancelled` | may remain healthy | none | none |
 | `card_completion_ambiguous` | result status `ambiguous`, best effort | closes immediately | none | never repeated |
 | `transport_failed` | none; observed locally | closing, then closed | none | by commit boundary |
 | `session_integrity_failed` | none; channel unusable | closes immediately | none | by commit boundary |
-| `authenticated_protocol_violation` | `session.close` reason `protocol_violation`, best effort | closes | one strike; quarantine at limit | never repeated |
-| `pairing_quarantined` | `session.close` reason `pairing_quarantined`, best effort | closes | quarantined; peer marks revoked | never repeated |
+| `authenticated_protocol_violation` | `session.close` reason `protocol_violation`, best effort | closes | revoked immediately; peer marks revoked | never repeated |
 | `pairing_revoked` | `session.close` reason `pairing_revoked`, best effort | closes | revoked; peer marks revoked | never repeated |
 | `local_security_shutdown` | none | closes | none | ambiguous if committed |
 
-An ordinary user denial is not an anomaly. It MUST NOT revoke, quarantine, or
-record a strike against a pairing.
+An ordinary user denial is not an anomaly. It MUST NOT revoke a pairing.
 
 ## 16. Transport profiles
 
@@ -1231,19 +1309,101 @@ A transport profile MUST provide:
 - no hidden reconnection or message replay; and
 - enough metadata to satisfy the prologue of Section 8.3.
 
-Initial design targets are:
+The initial transport profile registry is:
 
-- `apple-peer-v1` for Apple-native nearby connectivity;
-- `local-quic-v1` for authenticated RAPP over local QUIC;
-- `relay-websocket-v1` for an untrusted Internet relay; and
-- a future ICE-based direct profile using
-  [RFC 8445](https://www.rfc-editor.org/rfc/rfc8445.html).
+| Profile | Underlay | Status |
+| --- | --- | --- |
+| `apple-peer-v1` | Apple-native nearby connectivity | defined; implemented |
+| `fi.refineid.stream.v1` | one reliable ordered byte stream, initially TCP | defined in Section 16.1; implemented |
+| `local-quic-v1` | local QUIC | reserved design target |
+| `relay-websocket-v1` | untrusted Internet relay | reserved design target |
+
+A future ICE-based direct profile using
+[RFC 8445](https://www.rfc-editor.org/rfc/rfc8445.html) is anticipated but
+not reserved by name.
 
 QUIC, TLS, WebSocket, Bluetooth, and Apple frameworks are underlays. Their
 security never replaces the RAPP Noise session. A profile may attempt multiple
 candidates before authentication only according to an explicit user-visible
 connection action. Once Noise authentication begins, fallback requires a new
 session; during or after a committed operation it is forbidden.
+
+### 16.1 The stream profile
+
+`fi.refineid.stream.v1` carries RAPP frames over a single reliable ordered
+byte stream between the requester and the proxy, initially TCP over a network
+where the two devices can reach each other directly. The underlay contributes
+no security (Section 5); the profile exists to satisfy the frame contract of
+this section with the smallest possible mechanism, so that a requester
+platform without Apple-native connectivity can participate.
+
+**Connection direction.** The requester runs the listener; the proxy dials.
+This matches device reality: a desktop requester has a stable address and
+lifetime, while a phone proxy does not. The proxy dials both for pairing
+(Section 9.3, where the offer carries the listener's parameters) and for
+session establishment (Section 10, after an explicit action on the proxy
+whose holder is about to present the card anyway). Logical Noise roles are
+unchanged: the requester initiates every handshake over the accepted
+connection.
+
+**Framing.** Every frame is a 2-byte big-endian length prefix followed by
+exactly that many payload bytes. A declared length of zero is malformed. The
+16-bit prefix cannot express a length above `NOISE_MAX_MESSAGE`, and a
+receiver enforces its bounds from the prefix alone, before allocation.
+
+**Candidate parameters.** The offer's `transport-candidate.parameters` map
+for this profile is:
+
+```cddl
+stream-parameters = {
+  "endpoints": [1* tstr]    ; listener addresses, "host:port";
+                            ; an IPv6 host uses bracket form
+}
+```
+
+`candidate_id` is chosen by the requester and distinguishes multiple stream
+candidates within one offer. The proxy stores the selected candidate,
+including its endpoint list, at pairing confirmation and dials those
+endpoints for later sessions.
+
+**Rendezvous preamble.** Immediately after connecting, before any Noise
+message, the proxy sends exactly one plaintext preamble frame containing the
+deterministic-CBOR encoding of:
+
+```cddl
+stream-rendezvous = [
+  "RAPP-stream-v1",
+  tstr,                     ; purpose: "pairing" / "session"
+  bstr                      ; purpose "pairing": empty
+                            ; purpose "session": rendezvous_token, Section 8.5
+]
+```
+
+On accepting a connection, the requester reads exactly one bounded preamble
+frame. Purpose `pairing` is honored only while the listener has an active
+offer (Section 9.3); the requester then sends the first pairing handshake
+message. Purpose `session` is honored only when `rendezvous_token` equals the
+stored token of exactly one non-revoked pairing; the requester then initiates
+the session handshake with that pairing's keys. Any other preamble — unknown
+purpose, unknown token, malformed CBOR, oversized frame, or a second preamble
+— is pre-authentication invalid input (Section 14.5, class 1): the connection
+closes and no stored state changes.
+
+The preamble is unauthenticated routing metadata, exactly like a relay token
+(Section 17). Possession of a token lets an attacker elicit the first
+`Noise_KK` handshake message, which contains a fresh ephemeral public key and
+no identity, and lets a network observer link the connection to an
+unidentified recurring pairing; it enables nothing else. The requester
+processes one inbound connection's handshake at a time and MAY rate-limit
+connection attempts.
+
+**Strictness.** The profile inherits the protocol's single-connection
+discipline unchanged: one live session per pairing (`busy` otherwise), no
+hidden reconnection, no candidate fallback after authentication begins, and
+every anomaly fails the connection closed. A requester whose listener address
+has changed since pairing is unreachable until the user pairs anew or a
+reviewed extension defines candidate refresh; the profile deliberately
+prefers breakage to silent endpoint changes.
 
 ## 17. Rendezvous relay
 
@@ -1262,7 +1422,7 @@ The relay MUST:
 - document retained metadata and deletion periods.
 
 A relay that corrupts, drops, duplicates, or reorders frames causes session
-integrity failures and reconnection effort, never pairing loss or a strike
+integrity failures and reconnection effort, never pairing loss
 (Section 14.5). End-to-end encryption does not hide timing, endpoints,
 connection duration, or approximate message size from the relay. Padding and
 traffic-shaping are future extensions and must be evaluated against mobile
@@ -1320,6 +1480,11 @@ plaintext because it receives none.
 `pair_id` and `session_id` are derived from handshake hashes whose inputs
 include offer content that never crosses the network, so a network observer
 cannot compute them; neither identifier appears in plaintext on the wire.
+Where a transport profile requires plaintext rendezvous, it carries the
+separately derived `rendezvous_token` (Section 8.5), never `pair_id`. An
+observer of one network path can recognize that token's recurrence, which is
+inherent to rendezvous, but cannot connect it to `pair_id`, to the other
+identifiers, or to tokens observed for other pairings.
 
 The requester receives only profile-required results. An authentication or
 signing profile may necessarily return a certificate chain, public key,
@@ -1344,7 +1509,7 @@ machine-readable model:
 | `INV-04` | A proxy has at most one active credential operation. |
 | `INV-05` | One operation identifier causes at most one credential-command transmission. |
 | `INV-06` | Ambiguous completion is never retried automatically. |
-| `INV-07` | Quarantined or revoked keys are never automatically restored. |
+| `INV-07` | Revoked keys are never automatically restored. |
 | `INV-08` | Version, suite, grants, and transport are transcript-bound. |
 | `INV-09` | A relay never receives RAPP plaintext or credential material. |
 | `INV-10` | A requester never receives CAN, PIN, activation, or PUK values. |
@@ -1355,7 +1520,7 @@ machine-readable model:
 | `INV-15` | Local policy may be stricter than negotiated policy, never weaker. |
 | `INV-16` | Invalid CAN, PIN 1, or PIN 2 closes the RAPP session. |
 | `INV-17` | Credential rejection never automatically reconnects or repeats. |
-| `INV-18` | Unauthenticated or unattributable input never quarantines or revokes a stored pairing. |
+| `INV-18` | Unauthenticated or unattributable input never revokes a stored pairing. |
 
 ## 22. Conformance and verification
 
@@ -1388,8 +1553,8 @@ Conformance evidence includes:
 - parser fuzzing with allocation and nesting bounds;
 - generated coverage of every state transition, both role projections, every
   unexpected-input class, and every global event;
-- violation-strike accounting, quarantine at the limit, and both-sided
-  revocation visibility;
+- immediate authenticated-violation revocation and both-sided revocation
+  visibility;
 - physical-transmission instrumentation proving exact command counts;
 - fault injection before commit, before transmit, during transmit, after card
   response, before result, and before result acknowledgment;
@@ -1401,6 +1566,13 @@ Conformance evidence includes:
 - relay compromise, corruption, metadata, queue-expiry, and abuse-limit tests;
 - accessibility tests for every visible state and consent path; and
 - production-artifact inspection proving unsafe diagnostics are absent.
+
+The machine-readable corpus at
+`vectors/rapp-v26.8.17.135.json` fixes the deterministic CBOR,
+envelope-rejection, sequence, downgrade, grant, hash, and mandatory Noise
+XXpsk3/KK known-answer vectors for this document version. Fields prefixed
+`test_only_` are public deterministic test material and MUST NOT be used as
+runtime keys or pairing secrets.
 
 No card-mutating path may be described as working from simulator evidence
 alone. Exact released binaries require observed hardware evidence.
@@ -1447,13 +1619,12 @@ Review is specifically requested on:
    grants or prohibited outside local-only profiles;
 8. metadata leakage and practical padding for an Internet relay;
 9. liveness policy values under mobile power and background-execution limits;
-10. the violation-strike limit value, and whether strikes should ever reset;
-11. whether preserving an offer across failed handshakes enables griefing
+10. whether preserving an offer across failed handshakes enables griefing
     that per-offer serialization and rate limits do not already bound;
-12. post-quantum migration and hybrid pairing strategy;
-13. handling of local implementation faults without enabling peer-triggered
+11. post-quantum migration and hybrid pairing strategy;
+12. handling of local implementation faults without enabling peer-triggered
     denial of service; and
-14. completeness of the composite state machine and formal verification plan.
+13. completeness of the composite state machine and formal verification plan.
 
 ## 25. References
 
@@ -1498,8 +1669,8 @@ An external reviewer should be able to answer:
   permanent loss of a valid pairing or consume a live offer?
 - When can a credential or mutating card command physically occur?
 - How is a duplicate commit prevented after process failure?
-- Which failures close only a session, which record a strike, and which
-  destroy a pairing — and how does the innocent peer learn of destruction?
+- Which failures close only a session and which destroy a pairing, and how
+  does the innocent peer learn of destruction?
 - What happens if NFC fails immediately before or after card transmission?
 - Does any path automatically retry an ambiguous operation, and how is an
   ambiguous record later resolved without card replay?
@@ -1525,11 +1696,10 @@ destruction. This revision:
   (`pairing.hello`, `pairing.confirm`, `pairing.abort`), grant agreement with
   `grants_hash`, and the exact `request_hash` preimage;
 - reclassified established-channel decryption failure as a session-only
-  integrity failure, removing the relay's ability to destroy a pairing, and
-  replaced instant revocation with per-pairing violation strikes and a
-  quarantine limit;
-- made quarantine and revocation visible to the other peer through
-  authenticated close reasons, with defined behavior when no channel exists;
+  integrity failure, removing the relay's ability to destroy a pairing, while
+  retaining immediate revocation for authenticated protocol violations;
+- made revocation visible to the other peer through authenticated close
+  reasons, with defined behavior when no channel exists;
 - added the missing routine transitions: peer close, transport failure and
   EOF in every live state, pre-commit cancellation and expiry, card removal
   before transmission, and prerequisite-phase credential rejection including
@@ -1545,8 +1715,42 @@ destruction. This revision:
 - corrected FINEID retry-counter facts: only a failed PUK reset consumes a
   PUK attempt, and the CAN has no try counter, so counter rules now apply
   only to counter-bearing credentials;
-- extended forget, quarantine, and revocation to destroy offer, candidate,
+- extended forget and revocation to destroy offer, candidate,
   and session state coupled to the pairing; and
 - aligned frame limits with the Noise message ceiling, required pong
   challenge verification, bounded offer lifetime and size, and defined the
   storage protection of retained results.
+
+## Appendix C. Changes from 26.8.16.85
+
+Draft 26.8.16.85 continued to evolve after its version was stamped, so the
+label briefly named more than one document. This revision collects that
+drift under a fresh version and adds the first cross-platform transport
+profile. Relative to the originally stamped 26.8.16.85 text:
+
+- replaced per-pairing violation strikes and the quarantine state with
+  immediate revocation: the first authenticated protocol violation revokes
+  the pairing on both peers, removing `VIOLATION_STRIKE_LIMIT`, the
+  `quarantined` state, and the `pairing_quarantined` close reason;
+- extended credential rejection to durably revoke the pairing on both peers
+  with a written tombstone, replacing the earlier user-intent admission
+  record;
+- defined the closed action registry: `inspect_card`, `read_identity`,
+  `read_certificate`, `browser_authenticate`, and `sign_document`, with
+  certificate reads owned by the profile whose key the certificate serves;
+- defined the `browser_authenticate` and `sign_document` payload schemas and
+  the closed `key_profile` and `algorithm` registries, with digest lengths,
+  compatibility rules, and the proxy-side certificate match requirement;
+- registered `fi.refineid.stream.v1` (Section 16.1): a length-prefixed
+  stream profile in which the requester listens and the proxy dials, for
+  requester platforms without Apple-native connectivity;
+- generalized session establishment so that underlying connection direction
+  is a transport-profile property while the requester remains the handshake
+  initiator on every profile, and required a transport whose accepting
+  endpoint is the requester to indicate the pairing before the handshake;
+- added the derived `rendezvous_token` (Section 8.5), giving transports a
+  plaintext-safe pair-specific rendezvous value distinct from `pair_id`;
+- referenced the machine-readable conformance corpus from the conformance
+  section and carried its vectors forward under this document version; and
+- corrected the abstract, which still described repeated-violation pairing
+  destruction, to the single-violation rule.
