@@ -155,6 +155,9 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
         qr.render::<qrcode::render::unicode::Dense1x2>().build()
     );
     println!("scan with ReFineID on the iPhone; the offer expires in three minutes");
+    println!();
+    println!("offer text (the QR encodes exactly this):");
+    println!("{uri}");
     flush_now();
 
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
