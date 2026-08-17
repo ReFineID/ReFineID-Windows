@@ -51,7 +51,31 @@ internal sealed partial class MainPage : Page
         this.InitializeComponent();
         this.dispatcher = DispatcherQueue.GetForCurrentThread();
         this.DiagnosticsText.Text = DiagnosticsLabel();
+#if DEBUG
+        this.Loaded += this.OnLoaded;
+#endif
     }
+
+#if DEBUG
+    /// <summary>Debug-only launch flag that opens the pairing QR on launch.</summary>
+    private const string AutoPairArgument = "--pair";
+
+    /// <summary>
+    /// Debug-only convenience: <c>--pair</c> opens the pairing QR as soon as
+    /// the window is ready, so a test rig shows it without a click. This is
+    /// never compiled into a release build.
+    /// </summary>
+    private async void OnLoaded(object sender, RoutedEventArgs args)
+    {
+        this.Loaded -= this.OnLoaded;
+        if (
+            Array.Exists(Environment.GetCommandLineArgs(), argument => argument == AutoPairArgument)
+        )
+        {
+            await this.RunRemoteCardAsync().ConfigureAwait(true);
+        }
+    }
+#endif
 
     private static string DiagnosticsLabel()
     {
