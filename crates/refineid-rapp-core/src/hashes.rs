@@ -1,11 +1,9 @@
 //! The defined hashes of specification Section 8.5.
 //!
-//! `offer_hash` lives with the offer type; this module carries the request
-//! hash both peers must compute identically. The preimage is the
+//! `offer_hash` lives with the offer type; this module carries the grant and
+//! request hashes both peers must compute identically. Every preimage is the
 //! deterministic CBOR of a fixed shape, so a byte-level disagreement is an
-//! encoding defect rather than an ambiguity. The granted profile set is not
-//! hashed: it is agreed inside the authenticated channel through the equal
-//! `pairing.confirm` sets and held in memory beside the pair keys.
+//! encoding defect rather than an ambiguity.
 
 use sha2::{Digest, Sha256};
 
@@ -14,6 +12,27 @@ use crate::ids::{OperationId, SessionId};
 
 /// Domain string of the request-hash preimage array.
 const REQUEST_HASH_DOMAIN: &str = "RAPP-request-v1";
+
+/// The `grants_hash`: SHA-256 over the deterministic CBOR of the granted
+/// profile names sorted lexicographically by their UTF-8 bytes.
+///
+/// Both peers store it at pairing confirmation and bind it into every later
+/// session prologue, so a grant mismatch fails the session handshake.
+///
+/// # Errors
+///
+/// Fails only when a profile name exceeds an encoding limit.
+pub fn grants_hash(granted_profiles: &[String]) -> Result<[u8; 32], EncodeError> {
+    let mut sorted: Vec<&String> = granted_profiles.iter().collect();
+    sorted.sort_unstable();
+    let array = Value::Array(
+        sorted
+            .into_iter()
+            .map(|name| Value::Text(name.clone()))
+            .collect(),
+    );
+    Ok(Sha256::digest(&array.encode()?).into())
+}
 
 /// The `request_hash`: SHA-256 over the fixed-order preimage array binding
 /// one operation to its session, profile, action, context, and payload
@@ -48,9 +67,26 @@ pub fn request_hash(
     reason = "test vectors are constructed to be infallible"
 )]
 mod tests {
-    use super::request_hash;
+    use super::{grants_hash, request_hash};
     use crate::cbor::Value;
     use crate::ids::{OperationId, SessionId};
+
+    #[test]
+    fn grants_hash_is_order_independent() {
+        let forward = grants_hash(&[
+            "fi.eid.authentication.v1".into(),
+            "fi.eid.card-status.v1".into(),
+        ])
+        .unwrap();
+        let reverse = grants_hash(&[
+            "fi.eid.card-status.v1".into(),
+            "fi.eid.authentication.v1".into(),
+        ])
+        .unwrap();
+        assert_eq!(forward, reverse);
+        let different = grants_hash(&["fi.eid.card-status.v1".into()]).unwrap();
+        assert_ne!(forward, different);
+    }
 
     #[test]
     fn request_hash_binds_every_component() {

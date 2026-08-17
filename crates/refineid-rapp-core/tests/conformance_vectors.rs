@@ -7,16 +7,16 @@
 //! implementation's vocabulary, so every rejection class is mapped to this
 //! crate's error variant with an explicit table.
 //!
-//! The `stream_preamble` section is replayed by `stream_vectors.rs`; its
+//! The `stream_rendezvous` section is replayed by `stream_vectors.rs`; its
 //! vector count still gates the corpus metadata here.
 
 use std::collections::HashSet;
 
 use refineid_rapp_core::cbor::{DecodeError, Value};
-use refineid_rapp_core::hashes::request_hash;
+use refineid_rapp_core::hashes::{grants_hash, request_hash};
 use refineid_rapp_core::ids::{
-    OPERATION_ID_LENGTH, OperationId, PAIR_ID_LENGTH, SESSION_ID_LENGTH, SessionId, derive_pair_id,
-    derive_session_id,
+    OPERATION_ID_LENGTH, OperationId, PAIR_ID_LENGTH, RENDEZVOUS_TOKEN_LENGTH, SESSION_ID_LENGTH,
+    SessionId, derive_pair_id, derive_rendezvous_token, derive_session_id,
 };
 use serde::Deserialize;
 
@@ -26,7 +26,7 @@ use corpus_util::{CORPUS_JSON, decode_hex, fixed};
 /// The corpus self-description this replay is written against.
 const CORPUS_FORMAT: &str = "fi.refineid.rapp.conformance-v1";
 /// The protocol document revision the corpus is derived from.
-const PROTOCOL_DOCUMENT_VERSION: &str = "26.8.17.213";
+const PROTOCOL_DOCUMENT_VERSION: &str = "26.8.17.135";
 
 /// Vectors in the `deterministic_cbor` section.
 const DETERMINISTIC_CBOR_COUNT: usize = 15;
@@ -36,6 +36,8 @@ const REJECTED_CBOR_COUNT: usize = 8;
 const REJECTED_ENVELOPE_COUNT: usize = 12;
 /// Vectors in the `identifier_derivation` section.
 const IDENTIFIER_DERIVATION_COUNT: usize = 2;
+/// Vectors in the `grants_hash` section.
+const GRANTS_HASH_COUNT: usize = 3;
 /// Vectors in the `request_hash` section.
 const REQUEST_HASH_COUNT: usize = 1;
 /// Vectors in the `sequence_guard` section.
@@ -45,10 +47,10 @@ const WIRE_VERSION_COUNT: usize = 4;
 /// Vectors in the `grant_enforcement` section.
 const GRANT_ENFORCEMENT_COUNT: usize = 3;
 /// Vectors in the `noise_handshake` section.
-const NOISE_HANDSHAKE_COUNT: usize = 1;
-/// Vectors in the `stream_preamble` section (replayed by
+const NOISE_HANDSHAKE_COUNT: usize = 2;
+/// Vectors in the `stream_rendezvous` section (replayed by
 /// `stream_vectors.rs`).
-const STREAM_PREAMBLE_COUNT: usize = 5;
+const STREAM_RENDEZVOUS_COUNT: usize = 5;
 
 /// Bytes in a SHA-256 digest.
 const SHA256_LENGTH: usize = 32;
@@ -64,6 +66,7 @@ struct Corpus {
     deterministic_cbor: Vec<CborVector>,
     rejected_cbor: Vec<RejectedCborVector>,
     identifier_derivation: Vec<IdentifierVector>,
+    grants_hash: Vec<GrantsVector>,
     request_hash: Vec<RequestVector>,
 }
 
@@ -76,12 +79,13 @@ struct Metadata {
     rejected_cbor: Vec<NamedVector>,
     rejected_envelope: Vec<NamedVector>,
     identifier_derivation: Vec<NamedVector>,
+    grants_hash: Vec<NamedVector>,
     request_hash: Vec<NamedVector>,
     sequence_guard: Vec<NamedVector>,
     wire_version: Vec<NamedVector>,
     grant_enforcement: Vec<NamedVector>,
     noise_handshake: Vec<NamedVector>,
-    stream_preamble: Vec<NamedVector>,
+    stream_rendezvous: Vec<NamedVector>,
 }
 
 /// A vector reduced to its name.
@@ -134,6 +138,16 @@ struct IdentifierVector {
     handshake_hash_hex: String,
     pair_id_hex: String,
     session_id_hex: String,
+    rendezvous_token_hex: String,
+}
+
+/// One grants-hash vector.
+#[derive(Deserialize)]
+struct GrantsVector {
+    name: String,
+    profiles: Vec<String>,
+    canonical_cbor_hex: String,
+    sha256_hex: String,
 }
 
 /// One request-hash vector.
@@ -224,7 +238,7 @@ fn corpus_metadata_and_vector_names_are_stable() {
         PROTOCOL_DOCUMENT_VERSION
     );
 
-    let sections: [(&str, &[NamedVector], usize); 10] = [
+    let sections: [(&str, &[NamedVector], usize); 11] = [
         (
             "deterministic_cbor",
             &metadata.deterministic_cbor,
@@ -245,6 +259,7 @@ fn corpus_metadata_and_vector_names_are_stable() {
             &metadata.identifier_derivation,
             IDENTIFIER_DERIVATION_COUNT,
         ),
+        ("grants_hash", &metadata.grants_hash, GRANTS_HASH_COUNT),
         ("request_hash", &metadata.request_hash, REQUEST_HASH_COUNT),
         (
             "sequence_guard",
@@ -263,9 +278,9 @@ fn corpus_metadata_and_vector_names_are_stable() {
             NOISE_HANDSHAKE_COUNT,
         ),
         (
-            "stream_preamble",
-            &metadata.stream_preamble,
-            STREAM_PREAMBLE_COUNT,
+            "stream_rendezvous",
+            &metadata.stream_rendezvous,
+            STREAM_RENDEZVOUS_COUNT,
         ),
     ];
     let mut unique = HashSet::new();
@@ -361,6 +376,38 @@ fn derived_identifiers_match_golden_values() {
             derive_session_id(&handshake_hash).0,
             fixed::<SESSION_ID_LENGTH>(&vector.session_id_hex),
             "{} session id",
+            vector.name
+        );
+        assert_eq!(
+            derive_rendezvous_token(&handshake_hash).0,
+            fixed::<RENDEZVOUS_TOKEN_LENGTH>(&vector.rendezvous_token_hex),
+            "{} rendezvous token",
+            vector.name
+        );
+    }
+}
+
+#[test]
+fn grants_hash_normalizes_profile_order_and_matches_golden_values() {
+    let corpus = corpus();
+    assert_eq!(corpus.grants_hash.len(), GRANTS_HASH_COUNT);
+    for vector in &corpus.grants_hash {
+        assert_eq!(
+            grants_hash(&vector.profiles).expect("grants hash must compute"),
+            fixed::<SHA256_LENGTH>(&vector.sha256_hex),
+            "{} digest",
+            vector.name
+        );
+
+        // The canonical preimage is the deterministic CBOR of the profile
+        // names sorted by their UTF-8 bytes.
+        let mut sorted = vector.profiles.clone();
+        sorted.sort_unstable();
+        let preimage = Value::Array(sorted.into_iter().map(Value::Text).collect());
+        assert_eq!(
+            preimage.encode().expect("grants preimage must encode"),
+            decode_hex(&vector.canonical_cbor_hex),
+            "{} canonical preimage",
             vector.name
         );
     }

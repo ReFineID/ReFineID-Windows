@@ -789,6 +789,7 @@ dependencies = [
  "hex",
  "qrcode",
  "refineid-rapp-core",
+ "refineid-windows-credential-store",
 ]
 
 [[package]]
@@ -810,6 +811,7 @@ version = "26.8.10"
 dependencies = [
  "hex",
  "refineid-rapp-core",
+ "refineid-windows-credential-store",
  "serde",
  "serde_json",
 ]
@@ -831,6 +833,7 @@ name = "refineid-windows-credential-store"
 version = "26.8.10"
 dependencies = [
  "refineid-lib-core",
+ "refineid-rapp-core",
  "windows-sys",
  "zeroize",
 ]

@@ -1,5 +1,5 @@
 //! The machine-readable transition model of specification Section 14,
-//! transcribed from `rapp-state-machine-v26.8.17.213.yaml`.
+//! transcribed from `rapp-state-machine-v26.8.17.135.yaml`.
 //!
 //! The normative endpoint state is the product of three instance machines:
 //! pairing, session, and operation. Every transition carries a role, and an
@@ -52,8 +52,16 @@ pub enum Guard {
     TranscriptMatches,
     /// `granted_sets_equal`.
     GrantedSetsEqual,
+    /// `pairing_paired`.
+    PairingPaired,
+    /// `initiation_permitted`.
+    InitiationPermitted,
+    /// `ready_parameters_match`.
+    ReadyParametersMatch,
     /// `deadline_not_expired`.
     DeadlineNotExpired,
+    /// `another_session_live`.
+    AnotherSessionLive,
     /// `admission_permitted`.
     AdmissionPermitted,
     /// `hash_echo_matches`.
@@ -68,9 +76,7 @@ pub enum Guard {
     ProfileHasNoConsequentialCommand,
 }
 
-/// Pairing-instance states (Section 14.2). A pairing exists only as
-/// `paired_connected` — a live, liveness-maintained connection; there is no
-/// state in which a pairing persists without a live session.
+/// Pairing-instance states (Section 14.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PairingState {
     /// No peer keys exist.
@@ -81,8 +87,13 @@ pub enum PairingState {
     Handshaking,
     /// The authenticated exchange awaits both approvals.
     Confirming,
-    /// The live pairing: its authenticated channel is the session.
+    /// A durable pairing exists with no healthy session.
+    PairedDisconnected,
+    /// A durable pairing exists with a healthy or checking session.
     PairedConnected,
+    /// The pairing was terminated — locally, by authenticated peer notice,
+    /// by an authenticated protocol violation, or by credential rejection.
+    Revoked,
 }
 
 /// Pairing-machine events, by their YAML names.
@@ -104,6 +115,8 @@ pub enum PairingEvent {
     BothUsersConfirmed,
     /// `denied_aborted_or_timed_out`.
     DeniedAbortedOrTimedOut,
+    /// `session_healthy`.
+    SessionHealthy,
     /// `session_closed`.
     SessionClosed,
     /// `forget_pairing`.
@@ -116,33 +129,48 @@ pub enum PairingEvent {
     PeerRevocationNotice,
 }
 
-/// Session-instance states (Section 14.3). The session is the pairing's
-/// authenticated channel continuing past confirmation; it has no connect or
-/// handshake phase of its own.
+/// Session-instance states (Section 14.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
-    /// Confirmation has not completed.
+    /// No channel.
     Absent,
+    /// Transport establishment only (requester side).
+    Connecting,
+    /// Noise handshake and ready comparison only.
+    Authenticating,
     /// Liveness and at most one operation.
     Healthy,
     /// Liveness recovery only; new operations blocked.
     Checking,
     /// Operation classification, close notice, key destruction.
     Closing,
-    /// Terminal for the instance and, because the pairing is this
-    /// connection, for the pairing; no traffic.
+    /// Terminal session record; no traffic.
     Closed,
 }
 
 /// Session-machine events, by their YAML names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
-    /// `pairing_confirmed`.
-    PairingConfirmed,
+    /// `connect`.
+    Connect,
+    /// `transport_accepted`.
+    TransportAccepted,
+    /// `transport_connected`.
+    TransportConnected,
     /// `transport_failed`.
     TransportFailed,
     /// `user_disconnect`.
     UserDisconnect,
+    /// `handshake_complete`.
+    HandshakeComplete,
+    /// `second_session_detected`.
+    SecondSessionDetected,
+    /// `ready_verified`.
+    ReadyVerified,
+    /// `candidate_failure`.
+    CandidateFailure,
+    /// `busy_received`.
+    BusyReceived,
     /// `peer_close_received`.
     PeerCloseReceived,
     /// `authenticated_protocol_violation`.
@@ -376,15 +404,12 @@ pub const PAIRING_TRANSITIONS: &[Transition<PairingState, PairingEvent>] = &[
         Guard::Always,
         PairingState::Unpaired,
     ),
-    // There is no second handshake: the authenticated pairing channel
-    // continues as the live session, so confirmation enters the live
-    // pairing directly and any close of that session ends the pairing.
     row(
         PairingState::Confirming,
         PairingEvent::BothUsersConfirmed,
         Role::Both,
         Guard::GrantedSetsEqual,
-        PairingState::PairedConnected,
+        PairingState::PairedDisconnected,
     ),
     row(
         PairingState::Confirming,
@@ -394,10 +419,24 @@ pub const PAIRING_TRANSITIONS: &[Transition<PairingState, PairingEvent>] = &[
         PairingState::Unpaired,
     ),
     row(
+        PairingState::PairedDisconnected,
+        PairingEvent::SessionHealthy,
+        Role::Both,
+        Guard::Always,
+        PairingState::PairedConnected,
+    ),
+    row(
         PairingState::PairedConnected,
         PairingEvent::SessionClosed,
         Role::Both,
         Guard::Always,
+        PairingState::PairedDisconnected,
+    ),
+    row(
+        PairingState::PairedDisconnected,
+        PairingEvent::ForgetPairing,
+        Role::Both,
+        Guard::LocalUserAction,
         PairingState::Unpaired,
     ),
     row(
@@ -412,35 +451,130 @@ pub const PAIRING_TRANSITIONS: &[Transition<PairingState, PairingEvent>] = &[
         PairingEvent::AuthenticatedProtocolViolation,
         Role::Both,
         Guard::Always,
-        PairingState::Unpaired,
+        PairingState::Revoked,
     ),
     row(
         PairingState::PairedConnected,
         PairingEvent::LocalRevoke,
         Role::Both,
         Guard::LocalUserAction,
-        PairingState::Unpaired,
+        PairingState::Revoked,
+    ),
+    row(
+        PairingState::PairedDisconnected,
+        PairingEvent::LocalRevoke,
+        Role::Both,
+        Guard::LocalUserAction,
+        PairingState::Revoked,
     ),
     row(
         PairingState::PairedConnected,
         PairingEvent::PeerRevocationNotice,
         Role::Both,
         Guard::Always,
+        PairingState::Revoked,
+    ),
+    row(
+        PairingState::Revoked,
+        PairingEvent::ForgetPairing,
+        Role::Both,
+        Guard::LocalUserAction,
         PairingState::Unpaired,
     ),
 ];
 
 /// The session transitions, in YAML order with list-valued `from` expanded.
 pub const SESSION_TRANSITIONS: &[Transition<SessionState, SessionEvent>] = &[
-    // The session instance is the pairing's authenticated channel
-    // continuing past confirmation: pairing_confirmed creates it directly
-    // in healthy on that same channel.
     row(
         SessionState::Absent,
-        SessionEvent::PairingConfirmed,
+        SessionEvent::Connect,
+        Role::Requester,
+        Guard::InitiationPermitted,
+        SessionState::Connecting,
+    ),
+    row(
+        SessionState::Absent,
+        SessionEvent::TransportAccepted,
+        Role::Proxy,
+        Guard::PairingPaired,
+        SessionState::Authenticating,
+    ),
+    row(
+        SessionState::Connecting,
+        SessionEvent::TransportConnected,
+        Role::Requester,
+        Guard::Always,
+        SessionState::Authenticating,
+    ),
+    row(
+        SessionState::Connecting,
+        SessionEvent::TransportFailed,
+        Role::Requester,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Connecting,
+        SessionEvent::UserDisconnect,
+        Role::Requester,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::HandshakeComplete,
         Role::Both,
         Guard::Always,
+        SessionState::Authenticating,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::SecondSessionDetected,
+        Role::Proxy,
+        Guard::AnotherSessionLive,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::ReadyVerified,
+        Role::Both,
+        Guard::ReadyParametersMatch,
         SessionState::Healthy,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::CandidateFailure,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::BusyReceived,
+        Role::Requester,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::PeerCloseReceived,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::TransportFailed,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::AuthenticatedProtocolViolation,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closing,
     ),
     row(
         SessionState::Healthy,
@@ -597,6 +731,20 @@ pub const SESSION_TRANSITIONS: &[Transition<SessionState, SessionEvent>] = &[
         SessionState::Closing,
     ),
     row(
+        SessionState::Connecting,
+        SessionEvent::CloseRequestedByPairing,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::CloseRequestedByPairing,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
         SessionState::Healthy,
         SessionEvent::LocalSecurityShutdown,
         Role::Both,
@@ -609,6 +757,20 @@ pub const SESSION_TRANSITIONS: &[Transition<SessionState, SessionEvent>] = &[
         Role::Both,
         Guard::Always,
         SessionState::Closing,
+    ),
+    row(
+        SessionState::Connecting,
+        SessionEvent::LocalSecurityShutdown,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
+    ),
+    row(
+        SessionState::Authenticating,
+        SessionEvent::LocalSecurityShutdown,
+        Role::Both,
+        Guard::Always,
+        SessionState::Closed,
     ),
     row(
         SessionState::Closing,

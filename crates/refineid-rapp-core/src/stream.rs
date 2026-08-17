@@ -1,29 +1,32 @@
 //! The `fi.refineid.stream.v1` transport profile of specification
 //! Section 16.1.
 //!
-//! The requester runs the listener; the proxy dials exactly once, at
-//! pairing. That single accepted connection then lives as the session for
-//! the pairing's whole life, so the plaintext preamble that opens every
-//! connection has one registered purpose: reaching the listener's active
-//! pairing offer. The preamble is unauthenticated routing metadata; it
-//! enables nothing but that selection, and every anomaly closes the
-//! connection without touching any state (Section 14.5, class 1).
+//! The requester runs the listener; the proxy dials, for both pairing and
+//! sessions. Every connection opens with one plaintext rendezvous preamble
+//! frame that selects which handshake the accepting requester initiates.
+//! The preamble is unauthenticated routing metadata, exactly like a relay
+//! token: it enables nothing but the selection, and every anomaly closes
+//! the connection without touching stored state (Section 14.5, class 1).
 
 use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 use crate::cbor::Value;
+use crate::ids::RendezvousToken;
 use crate::transport::{FrameTransport, TcpFrameTransport, TransportError};
 
-/// Domain string opening every stream preamble.
-const STREAM_PREAMBLE_DOMAIN: &str = "RAPP-stream-v1";
+/// Domain string opening every stream rendezvous preamble.
+const STREAM_RENDEZVOUS_DOMAIN: &str = "RAPP-stream-v1";
 
-/// The preamble's only registered purpose: the active pairing offer.
+/// Preamble purpose naming a pairing attempt.
 const PURPOSE_PAIRING: &str = "pairing";
 
-/// Upper bound on an encoded preamble frame; the listener rejects a longer
-/// preamble before parsing it.
-pub const MAX_STREAM_PREAMBLE_FRAME: usize = 64;
+/// Preamble purpose naming a session attempt for a stored pairing.
+const PURPOSE_SESSION: &str = "session";
+
+/// Upper bound on an encoded rendezvous preamble frame; the listener
+/// rejects a longer preamble before parsing it.
+pub const MAX_STREAM_RENDEZVOUS_FRAME: usize = 64;
 
 /// Candidate parameter key carrying the listener endpoint list.
 const PARAMETER_ENDPOINTS: &str = "endpoints";
@@ -34,21 +37,32 @@ pub const MAX_STREAM_ENDPOINTS: usize = 8;
 /// Maximum UTF-8 bytes of one `host:port` endpoint literal.
 pub const MAX_STREAM_ENDPOINT_BYTES: usize = 255;
 
-/// The plaintext connection preamble, the first frame the dialing proxy
-/// sends on a fresh stream connection before any Noise message.
+/// One plaintext rendezvous preamble, the first frame on a fresh stream
+/// connection before any Noise message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StreamPreamble;
+pub enum StreamRendezvous {
+    /// Connect to the listener's currently active pairing offer.
+    Pairing,
+    /// Connect for a fresh session with the stored pairing this token
+    /// names.
+    Session(RendezvousToken),
+}
 
-impl StreamPreamble {
+impl StreamRendezvous {
     /// Encodes the preamble frame payload.
     ///
     /// # Errors
     ///
     /// Fails only when the value cannot be encoded within the wire limits.
-    pub fn encode(self) -> Result<Vec<u8>, StreamError> {
+    pub fn encode(&self) -> Result<Vec<u8>, StreamError> {
+        let (purpose, token_bytes) = match self {
+            Self::Pairing => (PURPOSE_PAIRING, Vec::new()),
+            Self::Session(token) => (PURPOSE_SESSION, token.0.to_vec()),
+        };
         Value::Array(vec![
-            Value::Text(STREAM_PREAMBLE_DOMAIN.to_owned()),
-            Value::Text(PURPOSE_PAIRING.to_owned()),
+            Value::Text(STREAM_RENDEZVOUS_DOMAIN.to_owned()),
+            Value::Text(purpose.to_owned()),
+            Value::Bytes(token_bytes),
         ])
         .encode()
         .map_err(|_| StreamError::Malformed)
@@ -59,25 +73,42 @@ impl StreamPreamble {
     /// # Errors
     ///
     /// Every failure is pre-authentication invalid input: the caller closes
-    /// the connection and changes no state. The retired `session` purpose is
-    /// an unregistered purpose like any other.
+    /// the connection and changes no stored state.
     pub fn decode(bytes: &[u8]) -> Result<Self, StreamError> {
-        if bytes.len() > MAX_STREAM_PREAMBLE_FRAME {
+        if bytes.len() > MAX_STREAM_RENDEZVOUS_FRAME {
             return Err(StreamError::Oversized);
         }
         let Ok(Value::Array(elements)) = Value::decode(bytes) else {
             return Err(StreamError::Malformed);
         };
-        let [Value::Text(domain), Value::Text(purpose)] = elements.as_slice() else {
+        let [
+            Value::Text(domain),
+            Value::Text(purpose),
+            Value::Bytes(token_bytes),
+        ] = elements.as_slice()
+        else {
             return Err(StreamError::Malformed);
         };
-        if domain != STREAM_PREAMBLE_DOMAIN {
+        if domain != STREAM_RENDEZVOUS_DOMAIN {
             return Err(StreamError::Malformed);
         }
-        if purpose != PURPOSE_PAIRING {
-            return Err(StreamError::UnknownPurpose);
+        match purpose.as_str() {
+            PURPOSE_PAIRING => {
+                if token_bytes.is_empty() {
+                    Ok(Self::Pairing)
+                } else {
+                    Err(StreamError::Malformed)
+                }
+            }
+            PURPOSE_SESSION => {
+                let token: [u8; crate::ids::RENDEZVOUS_TOKEN_LENGTH] = token_bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StreamError::Malformed)?;
+                Ok(Self::Session(RendezvousToken(token)))
+            }
+            _ => Err(StreamError::UnknownPurpose),
         }
-        Ok(Self)
     }
 }
 
@@ -103,7 +134,7 @@ pub fn stream_candidate_parameters(
     )])
 }
 
-/// Reads the listener endpoints back out of offer candidate parameters.
+/// Reads the listener endpoints back out of stored candidate parameters.
 ///
 /// # Errors
 ///
@@ -139,6 +170,21 @@ fn validate_endpoints(endpoints: &[String]) -> Result<(), StreamError> {
         return Err(StreamError::EndpointLength);
     }
     Ok(())
+}
+
+/// One accepted, preamble-classified stream connection.
+#[derive(Debug)]
+pub enum StreamAccept {
+    /// The dialing proxy asked for the active pairing offer.
+    Pairing(TcpFrameTransport),
+    /// The dialing proxy asked for a fresh session with a stored pairing.
+    Session {
+        /// The pair-specific token from the preamble. The caller looks it
+        /// up among non-revoked pairings and closes on no match.
+        rendezvous_token: RendezvousToken,
+        /// The connection, positioned after the preamble.
+        transport: TcpFrameTransport,
+    },
 }
 
 /// The requester's stream listener.
@@ -181,30 +227,34 @@ impl StreamListener {
     }
 
     /// Accepts one connection, reads exactly one bounded preamble frame,
-    /// and validates it, returning the connection positioned after the
-    /// preamble. A connection whose preamble is invalid is closed and
-    /// reported; no state changes here.
+    /// and classifies it. A connection whose preamble is invalid is closed
+    /// and reported; stored state never changes here.
     ///
     /// # Errors
     ///
     /// Fails on accept failure or an invalid preamble.
-    pub fn accept(&self) -> Result<TcpFrameTransport, StreamError> {
+    pub fn accept(&self) -> Result<StreamAccept, StreamError> {
         let (socket, _peer) = self.listener.accept().map_err(|_| StreamError::Accept)?;
-        self.validate(socket)
+        self.classify(socket)
     }
 
-    fn validate(&self, socket: TcpStream) -> Result<TcpFrameTransport, StreamError> {
+    fn classify(&self, socket: TcpStream) -> Result<StreamAccept, StreamError> {
         let mut transport =
             TcpFrameTransport::new(socket, &self.candidate_id, self.receive_deadline)
                 .map_err(|_| StreamError::Accept)?;
         let preamble = transport.receive_frame().map_err(StreamError::Preamble)?;
-        StreamPreamble::decode(&preamble)?;
-        Ok(transport)
+        match StreamRendezvous::decode(&preamble)? {
+            StreamRendezvous::Pairing => Ok(StreamAccept::Pairing(transport)),
+            StreamRendezvous::Session(rendezvous_token) => Ok(StreamAccept::Session {
+                rendezvous_token,
+                transport,
+            }),
+        }
     }
 }
 
-/// Dials a listener and sends the pairing preamble, as the proxy side does.
-/// Used by loopback tests and by a future Windows-hosted proxy.
+/// Dials a listener and sends the preamble, as the proxy side does. Used by
+/// loopback tests and by a future Windows-hosted proxy.
 ///
 /// # Errors
 ///
@@ -214,8 +264,9 @@ pub fn dial(
     endpoints: &[String],
     candidate_id: &str,
     receive_deadline: Duration,
+    rendezvous: &StreamRendezvous,
 ) -> Result<TcpFrameTransport, StreamError> {
-    let preamble = StreamPreamble.encode()?;
+    let preamble = rendezvous.encode()?;
     for endpoint in endpoints {
         let Ok(socket) = TcpStream::connect(endpoint.as_str()) else {
             continue;
@@ -233,9 +284,9 @@ pub fn dial(
 /// Rejected stream-profile bytes, parameters, or connection steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamError {
-    /// Structure, domain, or type was not exactly as specified.
+    /// Structure, domain, type, or token length was not as specified.
     Malformed,
-    /// Preamble frame exceeded [`MAX_STREAM_PREAMBLE_FRAME`].
+    /// Preamble frame exceeded [`MAX_STREAM_RENDEZVOUS_FRAME`].
     Oversized,
     /// Purpose string is not registered; the connection closes unanswered.
     UnknownPurpose,
@@ -263,33 +314,34 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        MAX_STREAM_ENDPOINTS, StreamError, StreamListener, StreamPreamble, dial,
+        MAX_STREAM_ENDPOINTS, StreamAccept, StreamError, StreamListener, StreamRendezvous, dial,
         stream_candidate_endpoints, stream_candidate_parameters,
     };
-    use crate::cbor::Value;
+    use crate::ids::RendezvousToken;
     use crate::transport::FrameTransport;
 
     const DEADLINE: Duration = Duration::from_secs(2);
     const CANDIDATE: &str = "stream-test";
 
+    fn token() -> RendezvousToken {
+        RendezvousToken([0x5A; 16])
+    }
+
     #[test]
-    fn preamble_round_trips_and_rejects_foreign_purposes() {
-        let pairing = StreamPreamble.encode().unwrap();
-        assert!(pairing.len() <= super::MAX_STREAM_PREAMBLE_FRAME);
-        assert_eq!(StreamPreamble::decode(&pairing).unwrap(), StreamPreamble);
-        let retired = Value::Array(vec![
-            Value::Text(super::STREAM_PREAMBLE_DOMAIN.to_owned()),
-            Value::Text("session".to_owned()),
-        ])
-        .encode()
-        .unwrap();
+    fn preambles_round_trip_and_reject_foreign_purposes() {
+        let pairing = StreamRendezvous::Pairing.encode().unwrap();
         assert_eq!(
-            StreamPreamble::decode(&retired),
-            Err(StreamError::UnknownPurpose)
+            StreamRendezvous::decode(&pairing).unwrap(),
+            StreamRendezvous::Pairing
         );
-        let oversized = vec![0u8; super::MAX_STREAM_PREAMBLE_FRAME + 1];
+        let session = StreamRendezvous::Session(token()).encode().unwrap();
         assert_eq!(
-            StreamPreamble::decode(&oversized),
+            StreamRendezvous::decode(&session).unwrap(),
+            StreamRendezvous::Session(token())
+        );
+        let oversized = vec![0u8; super::MAX_STREAM_RENDEZVOUS_FRAME + 1];
+        assert_eq!(
+            StreamRendezvous::decode(&oversized),
             Err(StreamError::Oversized)
         );
     }
@@ -307,17 +359,45 @@ mod tests {
     }
 
     #[test]
-    fn listener_accepts_a_pairing_dial() {
+    fn listener_classifies_pairing_and_session_dials() {
         let listener = StreamListener::bind("127.0.0.1:0", CANDIDATE, DEADLINE).unwrap();
         let port = listener.local_port().unwrap();
         let endpoints = vec![format!("127.0.0.1:{port}")];
 
+        let dial_endpoints = endpoints.clone();
         let dialer = std::thread::spawn(move || {
-            let mut transport = dial(&endpoints, CANDIDATE, DEADLINE).unwrap();
+            dial(
+                &dial_endpoints,
+                CANDIDATE,
+                DEADLINE,
+                &StreamRendezvous::Pairing,
+            )
+            .unwrap()
+        });
+        let accepted = listener.accept().unwrap();
+        assert!(matches!(accepted, StreamAccept::Pairing(_)));
+        drop(dialer.join().unwrap());
+
+        let dialer = std::thread::spawn(move || {
+            let mut transport = dial(
+                &endpoints,
+                CANDIDATE,
+                DEADLINE,
+                &StreamRendezvous::Session(RendezvousToken([0x5A; 16])),
+            )
+            .unwrap();
             // Prove the channel survives the preamble in both directions.
             transport.send_frame(&[0x01, 0x02]).unwrap();
         });
-        let mut transport = listener.accept().unwrap();
+        let accepted = listener.accept().unwrap();
+        let StreamAccept::Session {
+            rendezvous_token,
+            mut transport,
+        } = accepted
+        else {
+            panic!("expected a session accept");
+        };
+        assert_eq!(rendezvous_token, RendezvousToken([0x5A; 16]));
         assert_eq!(transport.receive_frame().unwrap(), vec![0x01, 0x02]);
         dialer.join().unwrap();
     }

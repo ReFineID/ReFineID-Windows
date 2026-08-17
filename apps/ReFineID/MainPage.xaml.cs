@@ -44,16 +44,7 @@ internal sealed partial class MainPage : Page
     /// <summary>Pairing-state poll cadence.</summary>
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(700);
 
-    /// <summary>Liveness cadence for a live pairing after the read.</summary>
-    private static readonly TimeSpan LivenessInterval = TimeSpan.FromSeconds(7);
-
     private readonly DispatcherQueue dispatcher;
-
-    /// <summary>The live pairing shown on the Person row, if any.</summary>
-    private ulong? activeHandle;
-
-    private DispatcherQueueTimer? livenessTimer;
-    private bool livenessCheckRunning;
 
     public MainPage()
     {
@@ -102,12 +93,6 @@ internal sealed partial class MainPage : Page
 
     private async Task RunRemoteCardAsync()
     {
-        // One pairing at a time: starting a new ceremony ends any live one.
-        if (this.activeHandle is not null)
-        {
-            this.DropLivePairing(notice: null);
-        }
-
         string? advertise = LocalAdvertiseEndpoint();
         if (advertise is null)
         {
@@ -164,79 +149,15 @@ internal sealed partial class MainPage : Page
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
             this.ShowSuccess($"Read the remote card of {holder}.");
-
-            // The pairing is the live connection and stays up behind the
-            // identity: keep the handle and watch it, so the row clears the
-            // moment the phone side goes away.
-            this.activeHandle = handle;
-            this.StartLivenessWatch();
         }
         catch (NativeRappException error)
         {
             this.ShowError(error.Message);
-            NativeRappService.EndPairing(handle);
         }
         finally
         {
             this.SetBusy(false);
-        }
-    }
-
-    private void StartLivenessWatch()
-    {
-        this.livenessTimer ??= this.dispatcher.CreateTimer();
-        this.livenessTimer.Interval = LivenessInterval;
-        this.livenessTimer.Tick += this.OnLivenessTick;
-        this.livenessTimer.Start();
-    }
-
-    private async void OnLivenessTick(DispatcherQueueTimer sender, object args)
-    {
-        if (this.livenessCheckRunning || this.activeHandle is not ulong handle)
-        {
-            return;
-        }
-
-        this.livenessCheckRunning = true;
-        try
-        {
-            await Task.Run(() => NativeRappService.CheckPairing(handle)).ConfigureAwait(true);
-        }
-        catch (NativeRappException)
-        {
-            this.DropLivePairing("The pairing ended; the phone closed or stopped answering.");
-        }
-        finally
-        {
-            this.livenessCheckRunning = false;
-        }
-    }
-
-    private void DropLivePairing(string? notice)
-    {
-        if (this.livenessTimer is DispatcherQueueTimer timer)
-        {
-            timer.Stop();
-            timer.Tick -= this.OnLivenessTick;
-        }
-
-        if (this.activeHandle is ulong handle)
-        {
-            this.activeHandle = null;
             NativeRappService.EndPairing(handle);
-        }
-
-        this.HolderText.Text = string.Empty;
-        this.HolderText.Visibility = Visibility.Collapsed;
-        this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
-        this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
-        if (notice is string message)
-        {
-            this.ShowStatus(InfoBarSeverity.Informational, message);
-        }
-        else
-        {
-            this.StatusInfoBar.IsOpen = false;
         }
     }
 
@@ -266,10 +187,25 @@ internal sealed partial class MainPage : Page
         }
     }
 
-    private void ForgetIdentity() =>
-        // Ending the handle sends the clean close, so the phone drops its
-        // side of the pairing at the same moment the row clears here.
-        this.DropLivePairing(notice: null);
+    private void ForgetIdentity()
+    {
+        this.HolderText.Text = string.Empty;
+        this.HolderText.Visibility = Visibility.Collapsed;
+        this.ForgetIdentityButton.Visibility = Visibility.Collapsed;
+        this.ConnectRemoteReaderButton.Visibility = Visibility.Visible;
+
+        // Clearing the row is not enough now that a pairing is durable: drop
+        // the stored pair keys from the device-only credential too.
+        try
+        {
+            NativeRappService.ForgetPairings();
+            this.StatusInfoBar.IsOpen = false;
+        }
+        catch (NativeRappException error)
+        {
+            this.ShowError(error.Message);
+        }
+    }
 
     private static string? LocalAdvertiseEndpoint()
     {

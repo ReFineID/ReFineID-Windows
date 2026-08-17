@@ -3,11 +3,10 @@
 //!
 //! The proxy here is test scaffolding, not a product: the real proxies are
 //! the holder's phones. It speaks the exact wire so the requester is
-//! exercised end to end - pairing with grant agreement continuing as the
-//! live session on the same channel, the prepare/commit/result exchange,
-//! denial, and the ends-of-pairing: credential rejection, the first
-//! authenticated violation, ambiguity on a committed close, and the plain
-//! close that takes the pairing with it.
+//! exercised end to end - pairing with grant agreement, sessions with the
+//! parameter echo, the prepare/commit/result exchange, denial, credential
+//! rejection revoking the pairing, immediate revocation on the first
+//! authenticated violation, and ambiguity on a committed close.
 
 #![allow(
     clippy::unwrap_used,
@@ -23,17 +22,18 @@ use std::time::Duration;
 
 use refineid_rapp_core::cbor::Value;
 use refineid_rapp_core::engine::{
-    OperationOutcome, PairingError, Requester, RequesterConfig, Session,
+    OperationOutcome, PairingError, Requester, RequesterConfig, SessionError,
 };
+use refineid_rapp_core::hashes::grants_hash;
 use refineid_rapp_core::ids::{
-    OfferId, PairId, PairingSecret, SessionId, derive_pair_id, derive_session_id,
+    Challenge, OfferId, PairId, PairingSecret, SessionId, derive_pair_id, derive_session_id,
 };
 use refineid_rapp_core::message::{
-    Body, CloseReason, Envelope, NegotiatedParameters, ResultStatus,
+    Body, CloseReason, Envelope, NegotiatedParameters, ResultStatus, SessionParameters,
 };
 use refineid_rapp_core::noise::{
-    HandshakeRole, PairKeys, SecureChannel, generate_pair_keys, pairing_prologue,
-    run_pairing_handshake,
+    CompletedHandshake, HandshakeRole, PairKeys, SecureChannel, generate_pair_keys,
+    pairing_prologue, run_pairing_handshake, run_session_handshake, session_prologue,
 };
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
 use refineid_rapp_core::operations::{
@@ -41,10 +41,10 @@ use refineid_rapp_core::operations::{
 };
 use refineid_rapp_core::profiles::{PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS};
 use refineid_rapp_core::store::{
-    MemoryJournal, MemoryPairingStore, OperationJournal, PairingStore,
+    MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition, PairingStore,
 };
 use refineid_rapp_core::transport::{MEMORY_PROFILE, MemoryTransport};
-use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
+use refineid_rapp_core::{PAIRING_SUITE, SESSION_SUITE, WIRE_VERSION};
 
 /// A generous deadline for scripted exchanges.
 const DEADLINE: Duration = Duration::from_secs(2);
@@ -102,9 +102,16 @@ fn inspection_body() -> Vec<(String, Value)> {
     ]
 }
 
+/// The proxy's durable half of a pairing, kept across sessions.
+struct ProxyPairing {
+    keys: PairKeys,
+    requester_public: Vec<u8>,
+    pair_id: PairId,
+    grants: [u8; 32],
+}
+
 /// An envelope channel with proxy-owned sequence numbers, so tests can
-/// both conform and deliberately misbehave. After pairing it continues as
-/// the proxy's session channel with its sequences carried forward.
+/// both conform and deliberately misbehave.
 struct ProxyChannel {
     secure: SecureChannel<MemoryTransport>,
     session_id: SessionId,
@@ -150,15 +157,7 @@ impl ProxyChannel {
     }
 }
 
-/// The proxy's live half of a pairing: the pairing channel that is now its
-/// session, with the identifiers both peers derived.
-struct ProxyPairing {
-    channel: ProxyChannel,
-    pair_id: PairId,
-}
-
-/// Runs the proxy half of the pairing exchange. The channel continues as
-/// the proxy's live session; nothing further is negotiated.
+/// Runs the proxy half of the pairing exchange and returns its stored half.
 fn proxy_pair(
     transport: MemoryTransport,
     offer: &PairingOffer,
@@ -167,7 +166,7 @@ fn proxy_pair(
 ) -> ProxyPairing {
     let offer_hash = offer.offer_hash().unwrap();
     let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, MEMORY_PROFILE).unwrap();
-    let keys: PairKeys = generate_pair_keys().unwrap();
+    let keys = generate_pair_keys().unwrap();
     let done = run_pairing_handshake(
         HandshakeRole::Responder,
         transport,
@@ -176,6 +175,7 @@ fn proxy_pair(
         &prologue,
     )
     .unwrap();
+    let requester_public = done.peer_static_public.clone().unwrap();
     let session_id = derive_session_id(&done.handshake_hash);
     let pair_id = derive_pair_id(&done.handshake_hash);
     let mut channel = ProxyChannel {
@@ -207,15 +207,66 @@ fn proxy_pair(
     channel.send(Body::PairingConfirm {
         granted_profiles: granted.to_vec(),
     });
-    ProxyPairing { channel, pair_id }
+    let grants = grants_hash(granted).unwrap();
+    // The requester closes the pairing channel; consume the notice.
+    let Body::SessionClose { .. } = channel.receive() else {
+        panic!("expected the pairing channel to close");
+    };
+    ProxyPairing {
+        keys,
+        requester_public,
+        pair_id,
+        grants,
+    }
 }
 
-/// Pairs a fresh requester with a proxy thread, returning the requester's
-/// live session and the proxy's continuing half of the same channel.
-fn paired(
-    requester: &mut TestRequester,
-    granted: &[String],
-) -> (Session<MemoryTransport>, ProxyPairing) {
+/// Accepts one session as the proxy and completes the ready exchange.
+fn proxy_accept_session(pairing: &ProxyPairing, transport: MemoryTransport) -> ProxyChannel {
+    let prologue = session_prologue(
+        WIRE_VERSION,
+        pairing.pair_id,
+        &pairing.grants,
+        MEMORY_PROFILE,
+    )
+    .unwrap();
+    let done: CompletedHandshake<MemoryTransport> = run_session_handshake(
+        HandshakeRole::Responder,
+        transport,
+        &pairing.keys.private,
+        &pairing.requester_public,
+        &prologue,
+    )
+    .unwrap();
+    let session_id = derive_session_id(&done.handshake_hash);
+    let mut channel = ProxyChannel {
+        secure: done.channel,
+        session_id,
+        send_sequence: 0,
+        receive_sequence: 0,
+    };
+    let parameters = SessionParameters {
+        version: WIRE_VERSION,
+        suite: SESSION_SUITE.into(),
+        transport_profile: MEMORY_PROFILE.into(),
+        candidate_id: CANDIDATE.into(),
+        grants_hash: pairing.grants,
+    };
+    let Body::SessionReady {
+        parameters: seen, ..
+    } = channel.receive()
+    else {
+        panic!("expected the requester session.ready");
+    };
+    assert_eq!(seen, parameters);
+    channel.send(Body::SessionReady {
+        parameters,
+        nonce: Challenge::random().unwrap().0,
+    });
+    channel
+}
+
+/// Pairs a fresh requester with a proxy thread and returns both halves.
+fn paired(requester: &mut TestRequester, granted: &[String]) -> (PairId, ProxyPairing) {
     let offer = test_offer();
     let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let secret_bytes = [0x77u8; 32];
@@ -230,7 +281,7 @@ fn paired(
         )
     });
     let profile_request: Vec<String> = granted.to_vec();
-    let session = requester
+    let pair_id = requester
         .pair(
             &offer,
             PairingSecret(secret_bytes),
@@ -243,34 +294,21 @@ fn paired(
         )
         .unwrap();
     let proxy_pairing = proxy.join().unwrap();
-    assert_eq!(proxy_pairing.pair_id, session.pair_id());
-    (session, proxy_pairing)
+    assert_eq!(proxy_pairing.pair_id, pair_id);
+    (pair_id, proxy_pairing)
 }
 
 #[test]
-fn pairing_holds_the_record_and_a_close_ends_it() {
+fn pairing_stores_matching_records_on_both_sides() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let pair_id = session.pair_id();
-    {
-        let record = requester.store().get(pair_id).unwrap();
-        assert_eq!(record.granted_profiles, granted);
-        assert_eq!(record.peer_display_name, "Phone");
-    }
-
-    // The session is the pairing: closing it removes the record, whose drop
-    // destroys the keys, and recovery needs a fresh ceremony.
-    let mut proxy_channel = proxy.channel;
-    let consume = std::thread::spawn(move || {
-        let Body::SessionClose { reason, .. } = proxy_channel.receive() else {
-            panic!("expected the close notice");
-        };
-        assert_eq!(reason, CloseReason::UserDisconnect);
-    });
-    requester.disconnect(&mut session, CloseReason::UserDisconnect);
-    consume.join().unwrap();
-    assert!(requester.store().get(pair_id).is_err());
+    let (pair_id, _proxy) = paired(&mut requester, &granted);
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.granted_profiles, granted);
+    assert_eq!(record.disposition, PairingDisposition::Paired);
+    assert_eq!(record.peer_display_name, "Phone");
+    assert_ne!(record.rendezvous_token.0, [0u8; 16]);
+    assert_ne!(record.rendezvous_token.0, record.pair_id.0);
 }
 
 #[test]
@@ -309,9 +347,10 @@ fn wrong_secret_fails_pairing_without_storing() {
 fn card_status_completes_without_commit() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         let Body::OperationRequest {
             operation_id,
             request_hash,
@@ -333,6 +372,7 @@ fn card_status_completes_without_commit() {
             panic!("expected the completed result to be acknowledged");
         };
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
         .execute(&mut session, &CardOperation::InspectCard, 30_000)
         .unwrap();
@@ -350,17 +390,16 @@ fn card_status_completes_without_commit() {
             puk_attempts: None,
         }
     );
-    // The safe read leaves the session, and with it the pairing, live.
-    assert!(requester.store().get(session.pair_id()).is_ok());
 }
 
 #[test]
 fn authentication_walks_prepare_commit_result() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         let Body::OperationRequest {
             operation_id,
             request_hash,
@@ -396,6 +435,7 @@ fn authentication_walks_prepare_commit_result() {
             panic!("expected the completed result to be acknowledged");
         };
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
         .execute(&mut session, &authentication_operation(), 60_000)
         .unwrap();
@@ -410,9 +450,10 @@ fn authentication_walks_prepare_commit_result() {
 fn denial_leaves_the_session_healthy() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         for _ in 0..2 {
             let Body::OperationRequest {
                 operation_id,
@@ -431,6 +472,7 @@ fn denial_leaves_the_session_healthy() {
             });
         }
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     for _ in 0..2 {
         let outcome = requester
             .execute(&mut session, &authentication_operation(), 30_000)
@@ -438,17 +480,16 @@ fn denial_leaves_the_session_healthy() {
         assert_eq!(outcome, OperationOutcome::Denied);
     }
     proxy.join().unwrap();
-    assert!(requester.store().get(session.pair_id()).is_ok());
 }
 
 #[test]
-fn credential_rejection_ends_the_pairing() {
+fn credential_rejection_revokes_the_pairing() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let pair_id = session.pair_id();
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         let Body::OperationRequest {
             operation_id,
             request_hash,
@@ -466,28 +507,39 @@ fn credential_rejection_ends_the_pairing() {
         });
         channel.send(Body::SessionClose {
             reason: CloseReason::CredentialRejected,
-            last_received_sequence: 2,
+            last_received_sequence: 1,
         });
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
         .execute(&mut session, &authentication_operation(), 30_000)
         .unwrap();
     proxy.join().unwrap();
     assert_eq!(outcome, OperationOutcome::CredentialRejected);
-    // Section 13.4: the authenticated credential_rejected result ends the
-    // pairing — the in-memory record is gone and the keys with it. Recovery
-    // requires a new manual pairing ceremony.
-    assert!(requester.store().get(pair_id).is_err());
+    // Section 13.4: the authenticated credential_rejected result durably
+    // revokes the pairing before the terminal outcome is reported.
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(record.local_private.is_empty());
+    assert!(record.peer_public.is_empty());
+
+    // Recovery requires a new manual pairing ceremony.
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    drop(proxy_transport);
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::NotPaired(PairingDisposition::Revoked))
+    ));
 }
 
 #[test]
 fn committed_close_classifies_as_ambiguous() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_AUTHENTICATION.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let pair_id = session.pair_id();
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         let Body::OperationRequest {
             operation_id,
             request_hash,
@@ -506,26 +558,26 @@ fn committed_close_classifies_as_ambiguous() {
         // The transport dies with the operation committed.
         drop(channel);
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
         .execute(&mut session, &authentication_operation(), 30_000)
         .unwrap();
     proxy.join().unwrap();
     assert_eq!(outcome, OperationOutcome::Ambiguous);
-    // The journal remembers the prohibition on automatic retry (INV-06),
-    // and the pairing ended with its connection.
+    // The journal remembers the prohibition on automatic retry (INV-06).
     let open = requester.journal().open_entries();
     assert!(open.is_empty());
-    assert!(requester.store().get(pair_id).is_err());
 }
 
 #[test]
-fn first_sequence_violation_ends_the_pairing() {
+fn first_sequence_violation_revokes_the_pairing() {
     let mut requester = test_requester();
     let granted = vec![PROFILE_CARD_STATUS.to_owned()];
-    let (mut session, proxy) = paired(&mut requester, &granted);
-    let pair_id = session.pair_id();
-    let mut channel = proxy.channel;
+    let (pair_id, proxy_pairing) = paired(&mut requester, &granted);
+
+    let (requester_transport, proxy_transport) = MemoryTransport::pair(CANDIDATE, DEADLINE);
     let proxy = std::thread::spawn(move || {
+        let mut channel = proxy_accept_session(&proxy_pairing, proxy_transport);
         let Body::OperationRequest {
             operation_id,
             request_hash,
@@ -545,13 +597,23 @@ fn first_sequence_violation_ends_the_pairing() {
         });
         // The requester answers with its best-effort close.
     });
+    let mut session = requester.connect(pair_id, requester_transport).unwrap();
     let outcome = requester
         .execute(&mut session, &CardOperation::InspectCard, 30_000)
         .unwrap();
     proxy.join().unwrap();
     // Pre-commit closure classifies the operation as cancelled.
     assert_eq!(outcome, OperationOutcome::Cancelled);
-    // Section 14.6: the first authenticated violation ends the pairing
-    // immediately, and destroyed keys are never restored (INV-07).
-    assert!(requester.store().get(pair_id).is_err());
+    // Section 14.6: the first authenticated violation revokes immediately.
+    let record = requester.store().get(pair_id).unwrap();
+    assert_eq!(record.disposition, PairingDisposition::Revoked);
+    assert!(record.local_private.is_empty());
+    assert!(record.peer_public.is_empty());
+
+    // Revoked keys are never restored (INV-07).
+    let (requester_transport, _other) = MemoryTransport::pair(CANDIDATE, DEADLINE);
+    assert!(matches!(
+        requester.connect(pair_id, requester_transport),
+        Err(SessionError::NotPaired(PairingDisposition::Revoked))
+    ));
 }

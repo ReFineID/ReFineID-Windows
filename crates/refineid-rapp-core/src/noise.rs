@@ -1,13 +1,12 @@
-//! The one Noise channel of specification Section 8.
+//! Noise channels of specification Section 8.
 //!
-//! RAPP has exactly one handshake: pairing runs
-//! `Noise_XXpsk3_25519_ChaChaPoly_SHA256` with the offer's bearer secret as
-//! the third-message pre-shared key, and the authenticated channel it
-//! creates continues as the live session for the pairing's whole life. The
-//! handshake binds a prologue both peers can compute before it begins
-//! (Section 8.3), and every handshake message carries an empty payload; a
-//! non-empty payload aborts, because nothing before the pre-shared key is
-//! mixed authenticates the peer.
+//! Pairing runs `Noise_XXpsk3_25519_ChaChaPoly_SHA256` with the offer's
+//! bearer secret as the third-message pre-shared key; sessions run
+//! `Noise_KK_25519_ChaChaPoly_SHA256` with the stored pair-specific static
+//! keys. Every handshake binds a prologue both peers can compute before the
+//! handshake begins (Section 8.3), and every handshake message carries an
+//! empty payload; a non-empty payload aborts, because nothing before the
+//! pre-shared key is mixed authenticates the peer.
 //!
 //! A completed handshake yields the handshake hash for the derived
 //! identifiers of Section 8.5 and a [`SecureChannel`] that moves exactly one
@@ -15,14 +14,16 @@
 
 use zeroize::Zeroizing;
 
-use crate::PAIRING_SUITE;
 use crate::cbor::Value;
-use crate::ids::PairingSecret;
+use crate::ids::{PairId, PairingSecret};
 use crate::limits;
 use crate::transport::{FrameTransport, TransportError};
+use crate::{PAIRING_SUITE, SESSION_SUITE};
 
 /// Domain string of the pairing prologue array.
 const PAIRING_PROLOGUE_DOMAIN: &str = "RAPP-pairing-v1";
+/// Domain string of the session prologue array.
+const SESSION_PROLOGUE_DOMAIN: &str = "RAPP-session-v1";
 /// The pre-shared key slot of `Noise_XXpsk3`.
 const PAIRING_PSK_SLOT: u8 = 3;
 
@@ -86,6 +87,11 @@ fn pairing_parameters() -> Result<snow::params::NoiseParams, HandshakeError> {
     PAIRING_SUITE.parse().map_err(|_| HandshakeError::Failed)
 }
 
+/// Parses the mandatory session suite name.
+fn session_parameters() -> Result<snow::params::NoiseParams, HandshakeError> {
+    SESSION_SUITE.parse().map_err(|_| HandshakeError::Failed)
+}
+
 /// The deterministic-CBOR pairing prologue of Section 8.3.
 ///
 /// # Errors
@@ -107,13 +113,36 @@ pub fn pairing_prologue(
     .map_err(|_| HandshakeError::Prologue)
 }
 
-/// What the completed handshake hands to the layer above.
+/// The deterministic-CBOR session prologue of Section 8.3.
+///
+/// # Errors
+///
+/// Fails only when a component exceeds an encoding limit.
+pub fn session_prologue(
+    version: (u64, u64),
+    pair_id: PairId,
+    grants_hash: &[u8; 32],
+    transport_profile: &str,
+) -> Result<Vec<u8>, HandshakeError> {
+    Value::Array(vec![
+        Value::Text(SESSION_PROLOGUE_DOMAIN.into()),
+        Value::Array(vec![Value::Unsigned(version.0), Value::Unsigned(version.1)]),
+        Value::Text(SESSION_SUITE.into()),
+        Value::Bytes(pair_id.0.to_vec()),
+        Value::Bytes(grants_hash.to_vec()),
+        Value::Text(transport_profile.into()),
+    ])
+    .encode()
+    .map_err(|_| HandshakeError::Prologue)
+}
+
+/// What a completed handshake hands to the layer above.
 pub struct CompletedHandshake<Transport: FrameTransport> {
     /// The encrypted channel.
     pub channel: SecureChannel<Transport>,
     /// The Noise handshake hash for the derived identifiers of Section 8.5.
     pub handshake_hash: Vec<u8>,
-    /// The peer's static public key, present after the pairing handshake.
+    /// The peer's static public key, present after a pairing handshake.
     pub peer_static_public: Option<Vec<u8>>,
 }
 
@@ -164,6 +193,35 @@ pub fn run_pairing_handshake<Transport: FrameTransport>(
     .map_err(|_| HandshakeError::Failed)?;
     drop(pairing_secret);
     run_handshake(state, transport, true)
+}
+
+/// Runs the session handshake over a transport with stored pair keys.
+///
+/// # Errors
+///
+/// Fails on transport loss, a non-empty handshake payload, or cryptographic
+/// failure — including the peer not holding the expected pair key, which is
+/// how a revoked peer is discovered (Section 14.6).
+pub fn run_session_handshake<Transport: FrameTransport>(
+    role: HandshakeRole,
+    transport: Transport,
+    local_private: &[u8],
+    peer_public: &[u8],
+    prologue: &[u8],
+) -> Result<CompletedHandshake<Transport>, HandshakeError> {
+    let builder = snow::Builder::new(session_parameters()?)
+        .prologue(prologue)
+        .map_err(|_| HandshakeError::Failed)?
+        .local_private_key(local_private)
+        .map_err(|_| HandshakeError::Failed)?
+        .remote_public_key(peer_public)
+        .map_err(|_| HandshakeError::Failed)?;
+    let state = match role {
+        HandshakeRole::Initiator => builder.build_initiator(),
+        HandshakeRole::Responder => builder.build_responder(),
+    }
+    .map_err(|_| HandshakeError::Failed)?;
+    run_handshake(state, transport, false)
 }
 
 /// Drives a handshake to completion with empty payloads in both directions.
@@ -285,6 +343,7 @@ mod tests {
 
     use super::{
         HandshakeError, HandshakeRole, generate_pair_keys, pairing_prologue, run_pairing_handshake,
+        run_session_handshake, session_prologue,
     };
     use crate::ids::{PairingSecret, derive_pair_id, derive_session_id};
     use crate::transport::MemoryTransport;
@@ -370,41 +429,70 @@ mod tests {
     }
 
     #[test]
-    fn both_channel_identifiers_derive_from_the_one_handshake() {
-        let (requester_transport, proxy_transport) =
-            MemoryTransport::pair("m-i", Duration::from_millis(500));
+    fn session_handshake_requires_the_stored_pair_keys() {
         let (requester_keys, proxy_keys) = paired_keys();
-        let prologue = pairing_prologue(WIRE_VERSION, &[3u8; 32], MEMORY_PROFILE).unwrap();
+        let grants_hash = [3u8; 32];
+        let pair_id = derive_pair_id(&[5u8; 32]);
+        let prologue =
+            session_prologue(WIRE_VERSION, pair_id, &grants_hash, MEMORY_PROFILE).unwrap();
+
+        // With the stored keys the session completes and both sides derive
+        // one session identifier.
+        let (requester_transport, proxy_transport) =
+            MemoryTransport::pair("m-s", Duration::from_millis(500));
         let proxy_prologue = prologue.clone();
+        let proxy_private = proxy_keys.private.clone();
+        let requester_public = requester_keys.public.clone();
         let proxy_thread = std::thread::spawn(move || {
-            run_pairing_handshake(
+            run_session_handshake(
                 HandshakeRole::Responder,
                 proxy_transport,
-                &proxy_keys,
-                PairingSecret([5u8; 32]),
+                &proxy_private,
+                &requester_public,
                 &proxy_prologue,
             )
             .map(|done| done.handshake_hash)
         });
-        let requester_done = run_pairing_handshake(
+        let requester_done = run_session_handshake(
             HandshakeRole::Initiator,
             requester_transport,
-            &requester_keys,
-            PairingSecret([5u8; 32]),
+            &requester_keys.private,
+            &proxy_keys.public,
             &prologue,
         )
         .unwrap();
         let proxy_hash = proxy_thread.join().unwrap().unwrap();
-        // The channel that carries the session is the pairing channel, so
-        // both identifiers come from the same completed handshake.
         assert_eq!(
             derive_session_id(&requester_done.handshake_hash),
             derive_session_id(&proxy_hash)
         );
-        assert_eq!(
-            derive_pair_id(&requester_done.handshake_hash),
-            derive_pair_id(&proxy_hash)
+
+        // With a different key on one side the handshake fails: this is how
+        // a peer that revoked with no channel is discovered.
+        let (requester_transport, proxy_transport) =
+            MemoryTransport::pair("m-x", Duration::from_millis(500));
+        let stranger = generate_pair_keys().unwrap();
+        let proxy_prologue = prologue.clone();
+        let proxy_private = proxy_keys.private.clone();
+        let stranger_public = stranger.public;
+        let proxy_thread = std::thread::spawn(move || {
+            run_session_handshake(
+                HandshakeRole::Responder,
+                proxy_transport,
+                &proxy_private,
+                &stranger_public,
+                &proxy_prologue,
+            )
+            .map(|_| ())
+        });
+        let requester = run_session_handshake(
+            HandshakeRole::Initiator,
+            requester_transport,
+            &requester_keys.private,
+            &proxy_keys.public,
+            &prologue,
         );
+        assert!(requester.is_err() || proxy_thread.join().unwrap().is_err());
     }
 
     #[test]
