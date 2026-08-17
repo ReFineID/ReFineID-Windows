@@ -30,19 +30,27 @@
 
 use core::fmt;
 
-use refineid_lib_core::can::{CAN_DIGITS, Can};
+#[cfg(windows)]
+use refineid_lib_core::can::CAN_DIGITS;
+use refineid_lib_core::can::Can;
 
 #[cfg(windows)]
 use zeroize::Zeroize as _;
+
+mod pairing;
+
+pub use pairing::{CredentialPairingStore, delete_pairing_set};
 
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.
 ///
 /// The Card Module ABI currently caps ATRs at 33 bytes. A slightly larger
 /// bound leaves the store reusable by PC/SC adapters without accepting an
 /// unbounded target name.
+#[cfg(any(windows, test))]
 const MAX_ATR_BYTES: usize = 64;
 
 /// Prefix reserved for `ReFineID` generic credentials.
+#[cfg(any(windows, test))]
 const TARGET_PREFIX: &str = "ReFineID_NFC_ATR_";
 
 /// A Windows Credential Manager failure.
@@ -62,6 +70,8 @@ pub enum CredentialStoreError {
     },
     /// A stored blob was not a valid six-digit CAN.
     InvalidStoredCan,
+    /// A stored pairing-set blob was malformed.
+    InvalidStoredPairing,
     /// This build is not running on Windows.
     UnsupportedPlatform,
 }
@@ -82,6 +92,7 @@ impl fmt::Display for CredentialStoreError {
             Self::InvalidStoredCan => {
                 formatter.write_str("stored contactless credential is malformed")
             }
+            Self::InvalidStoredPairing => formatter.write_str("stored pairing set is malformed"),
             Self::UnsupportedPlatform => {
                 formatter.write_str("Windows Credential Manager is unavailable")
             }
@@ -263,19 +274,28 @@ pub fn delete_can(atr: &[u8]) -> Result<(), CredentialStoreError> {
 
 #[cfg(not(windows))]
 /// Non-Windows builds expose the same API for workspace type checking.
-pub fn save_can(_atr: &[u8], _can: &Can) -> Result<(), CredentialStoreError> {
+///
+/// # Errors
+/// Always fails: the Windows Credential Manager is unavailable off Windows.
+pub const fn save_can(_atr: &[u8], _can: &Can) -> Result<(), CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
 #[cfg(not(windows))]
 /// Non-Windows builds expose the same API for workspace type checking.
-pub fn read_can(_atr: &[u8]) -> Result<Option<Can>, CredentialStoreError> {
+///
+/// # Errors
+/// Always fails: the Windows Credential Manager is unavailable off Windows.
+pub const fn read_can(_atr: &[u8]) -> Result<Option<Can>, CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
 #[cfg(not(windows))]
 /// Non-Windows builds expose the same API for workspace type checking.
-pub fn delete_can(_atr: &[u8]) -> Result<(), CredentialStoreError> {
+///
+/// # Errors
+/// Always fails: the Windows Credential Manager is unavailable off Windows.
+pub const fn delete_can(_atr: &[u8]) -> Result<(), CredentialStoreError> {
     Err(CredentialStoreError::UnsupportedPlatform)
 }
 
@@ -285,6 +305,7 @@ fn target_name_wide(atr: &[u8]) -> Result<Vec<u16>, CredentialStoreError> {
     Ok(target.encode_utf16().chain(core::iter::once(0)).collect())
 }
 
+#[cfg(any(windows, test))]
 fn target_name(atr: &[u8]) -> Result<String, CredentialStoreError> {
     if atr.is_empty() {
         return Err(CredentialStoreError::EmptyAtr);
