@@ -8,6 +8,7 @@ members = [
     "crates/refineid-msi",
     "crates/refineid-rapp-cli",
     "crates/refineid-rapp-core",
+    "crates/refineid-rapp-ffi",
     "crates/refineid-settings-ffi",
     "crates/refineid-windows-credential-store",
 ]

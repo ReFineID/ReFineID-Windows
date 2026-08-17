@@ -805,6 +805,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "refineid-rapp-ffi"
+version = "26.8.10"
+dependencies = [
+ "hex",
+ "refineid-rapp-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "refineid-settings-ffi"
 version = "26.8.10"
 dependencies = [
