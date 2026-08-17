@@ -1,0 +1,63 @@
+name: CI
+
+# The authoritative format, lint, and build gate. The Windows Card Module and
+# credential-store crates only compile against the Windows target, and the
+# WinUI requester needs the Windows workload, so the whole gate runs on a
+# Windows runner. The local pre-commit hook runs the cross-platform subset it
+# can (see .githooks/pre-commit); this job is what a pull request must pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup honours rust-toolchain.toml (channel, clippy, rustfmt, and the
+      # windows-msvc targets); the first cargo call installs it.
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Requester core tests
+        run: cargo test -p refineid-lib-core
+
+      # The Rust bridge the WinUI app loads; built explicitly into target/debug
+      # so the C# build can skip its own cargo invocation and just consume the
+      # cdylib the project's Content item copies.
+      - name: Build RAPP bridge
+        run: cargo build -p refineid-rapp-ffi
+
+      - name: Restore requester
+        run: dotnet restore apps/ReFineID/ReFineID.csproj -p:Platform=x64
+
+      - name: C# formatting
+        run: dotnet format apps/ReFineID/ReFineID.csproj --verify-no-changes --no-restore
+
+      # TreatWarningsAsErrors and EnforceCodeStyleInBuild are set in the
+      # project, so a clean build is itself a lint gate.
+      - name: Build requester
+        run: >-
+          dotnet build apps/ReFineID/ReFineID.csproj
+          -c Debug -p:Platform=x64 -p:SkipRustBuild=true --no-restore
+          -p:WindowsPackageType=None -p:EnableMsixTooling=false
