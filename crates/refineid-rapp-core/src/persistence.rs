@@ -25,6 +25,12 @@ const PAIRING_BLOB_MAGIC: &[u8] = b"RAPP-pair-record";
 /// decoder refuses an unknown value rather than misreading an old blob.
 const PAIRING_BLOB_VERSION: u8 = 1;
 
+/// Format tag identifying a whole stored pairing set.
+const PAIRING_SET_MAGIC: &[u8] = b"RAPP-pair-set";
+
+/// The pairing-set encoding revision.
+const PAIRING_SET_VERSION: u8 = 1;
+
 /// Disposition tag for a usable pairing.
 const DISPOSITION_PAIRED: u8 = 0;
 /// Disposition tag for a revoked (tombstoned) pairing.
@@ -161,6 +167,53 @@ pub fn decode_pairing_record(blob: &[u8]) -> Result<PairingRecord, PairingCodecE
     })
 }
 
+/// Serializes a whole pairing set as one device-only blob.
+///
+/// The durable store persists every record together so one atomic credential
+/// write covers an insert, update, or removal. Like [`encode_pairing_record`],
+/// the result carries private keys and is wrapped in [`Zeroizing`].
+#[must_use]
+pub fn encode_pairing_records(records: &[PairingRecord]) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::new());
+    out.extend_from_slice(PAIRING_SET_MAGIC);
+    out.push(PAIRING_SET_VERSION);
+    put_length(&mut out, records.len());
+    for record in records {
+        put_bytes(&mut out, &encode_pairing_record(record));
+    }
+    out
+}
+
+/// Reconstructs a whole pairing set from a device-only blob.
+///
+/// An empty slice decodes to an empty set, so a store whose credential does not
+/// yet exist starts clean.
+///
+/// # Errors
+///
+/// Fails when the blob is not a pairing set, uses an unknown revision, ends
+/// mid-field, carries trailing bytes, or holds a malformed record.
+pub fn decode_pairing_records(blob: &[u8]) -> Result<Vec<PairingRecord>, PairingCodecError> {
+    if blob.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut reader = Reader::new(blob);
+    if reader.take(PAIRING_SET_MAGIC.len())? != PAIRING_SET_MAGIC {
+        return Err(PairingCodecError::BadMagic);
+    }
+    let version = reader.take_u8()?;
+    if version != PAIRING_SET_VERSION {
+        return Err(PairingCodecError::UnsupportedVersion { found: version });
+    }
+    let count = reader.take_length()?;
+    let mut records = Vec::new();
+    for _ in 0..count {
+        records.push(decode_pairing_record(reader.take_length_prefixed()?)?);
+    }
+    reader.finish()?;
+    Ok(records)
+}
+
 /// Maps a disposition to its wire tag.
 const fn disposition_tag(disposition: PairingDisposition) -> u8 {
     match disposition {
@@ -275,7 +328,7 @@ mod tests {
 
     use super::{
         PAIRING_BLOB_MAGIC, PAIRING_BLOB_VERSION, PairingCodecError, decode_pairing_record,
-        encode_pairing_record,
+        decode_pairing_records, encode_pairing_record, encode_pairing_records,
     };
     use crate::ids::{PairId, RendezvousToken};
     use crate::store::{PairingDisposition, PairingRecord};
@@ -338,6 +391,32 @@ mod tests {
         record.peer_public = Vec::new();
         let decoded = decode_pairing_record(&encode_pairing_record(&record)).unwrap();
         assert_same(&record, &decoded);
+    }
+
+    #[test]
+    fn round_trips_a_multi_record_set() {
+        let mut second = sample();
+        second.pair_id = PairId([8; 16]);
+        second.peer_display_name = "Petri's iPad".into();
+        let records = vec![sample(), second];
+        let decoded = decode_pairing_records(&encode_pairing_records(&records)).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_same(&records[0], &decoded[0]);
+        assert_same(&records[1], &decoded[1]);
+    }
+
+    #[test]
+    fn an_empty_blob_is_an_empty_set() {
+        assert!(decode_pairing_records(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn round_trips_an_empty_set() {
+        assert!(
+            decode_pairing_records(&encode_pairing_records(&[]))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

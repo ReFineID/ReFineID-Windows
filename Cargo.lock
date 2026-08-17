@@ -831,6 +831,7 @@ name = "refineid-windows-credential-store"
 version = "26.8.10"
 dependencies = [
  "refineid-lib-core",
+ "refineid-rapp-core",
  "windows-sys",
  "zeroize",
 ]
