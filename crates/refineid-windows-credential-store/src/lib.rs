@@ -37,10 +37,6 @@ use refineid_lib_core::can::Can;
 #[cfg(windows)]
 use zeroize::Zeroize as _;
 
-mod pairing;
-
-pub use pairing::{CredentialPairingStore, delete_pairing_set};
-
 /// Maximum PC/SC ATR size accepted by the shared credential namespace.
 ///
 /// The Card Module ABI currently caps ATRs at 33 bytes. A slightly larger
@@ -70,8 +66,6 @@ pub enum CredentialStoreError {
     },
     /// A stored blob was not a valid six-digit CAN.
     InvalidStoredCan,
-    /// A stored pairing-set blob was malformed.
-    InvalidStoredPairing,
     /// This build is not running on Windows.
     UnsupportedPlatform,
 }
@@ -92,7 +86,6 @@ impl fmt::Display for CredentialStoreError {
             Self::InvalidStoredCan => {
                 formatter.write_str("stored contactless credential is malformed")
             }
-            Self::InvalidStoredPairing => formatter.write_str("stored pairing set is malformed"),
             Self::UnsupportedPlatform => {
                 formatter.write_str("Windows Credential Manager is unavailable")
             }

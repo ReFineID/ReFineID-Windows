@@ -4,12 +4,7 @@
 //! real phone proxy in one process: it displays the pairing QR, accepts the
 //! phone's connection, confirms grants on both devices, then serves inbound
 //! sessions and runs typed card operations that the holder approves on the
-//! phone. Its pair keys live only for the process lifetime.
-//!
-//! `refineid-rapp reconnect` proves the durable path the minidriver will use:
-//! it loads a pairing the settings app already stored in the Windows
-//! credential vault and serves sessions against it, with no fresh pairing
-//! ceremony. Both share one session-serving loop.
+//! phone. The pair keys live only for the process; a pairing is never stored.
 //!
 //! This is a development tool. It prints operation results to the terminal
 //! and must not be distributed to end users.
@@ -32,7 +27,6 @@ use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore}
 use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
-use refineid_windows_credential_store::CredentialPairingStore;
 
 /// The one stream candidate this CLI advertises.
 const CANDIDATE_ID: &str = "stream-1";
@@ -48,19 +42,13 @@ const PERSON_ID_VISIBLE_CHARS: usize = 6;
 
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let outcome = match arguments.first().map(String::as_str) {
-        Some("pair-demo") => pair_demo(&arguments[1..]),
-        Some("reconnect") => reconnect(&arguments[1..]),
-        _ => {
-            eprintln!("usage:");
-            eprintln!("  refineid-rapp pair-demo --listen <bind-address> \\");
-            eprintln!("      --advertise <host:port> [--advertise <host:port> ...] \\");
-            eprintln!("      [--name <label>] [--sign-profile rsa3072|ecdsa384]");
-            eprintln!("  refineid-rapp reconnect --listen <bind-address> \\");
-            eprintln!("      [--sign-profile rsa3072|ecdsa384]");
-            std::process::exit(2);
-        }
-    };
+    if arguments.first().map(String::as_str) != Some("pair-demo") {
+        eprintln!("usage: refineid-rapp pair-demo --listen <bind-address> \\");
+        eprintln!("           --advertise <host:port> [--advertise <host:port> ...] \\");
+        eprintln!("           [--name <label>] [--sign-profile rsa3072|ecdsa384]");
+        std::process::exit(2);
+    }
+    let outcome = pair_demo(&arguments[1..]);
     if let Err(message) = outcome {
         eprintln!("error: {message}");
         std::process::exit(1);
@@ -216,54 +204,6 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
     };
     flush_now();
 
-    serve_sessions(
-        &mut requester,
-        &listener,
-        pair_id,
-        expected_token,
-        options.sign_profile,
-    )
-}
-
-/// Reconnects to a pairing the settings app already stored in the Windows
-/// credential vault and serves sessions against it -- the durable path the
-/// minidriver will use. No pairing ceremony runs; the phone dials the same
-/// listener address it stored at pairing.
-fn reconnect(arguments: &[String]) -> Result<(), String> {
-    let options = parse_options(arguments)?;
-
-    let store = CredentialPairingStore::load()
-        .map_err(|error| format!("cannot read the stored pairing: {error}"))?;
-    if store.is_empty() {
-        return Err("no pairing is stored; pair first in the settings app".into());
-    }
-
-    let mut requester = Requester::new(
-        RequesterConfig {
-            display_name: options.name.clone(),
-            platform: "Windows".into(),
-        },
-        store,
-        MemoryJournal::new(),
-    );
-
-    let (pair_id, expected_token) = {
-        let record = requester
-            .store()
-            .usable_pairing()
-            .ok_or("the stored pairing is revoked; pair again in the settings app")?;
-        println!(
-            "reconnecting to {} ({}); granted: {}",
-            record.peer_display_name,
-            record.peer_platform,
-            record.granted_profiles.join(", ")
-        );
-        (record.pair_id, record.rendezvous_token)
-    };
-    flush_now();
-
-    let listener = StreamListener::bind(&options.listen, CANDIDATE_ID, RECEIVE_DEADLINE)
-        .map_err(|error| format!("cannot bind {}: {error:?}", options.listen))?;
     serve_sessions(
         &mut requester,
         &listener,

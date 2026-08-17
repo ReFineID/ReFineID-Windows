@@ -16,7 +16,6 @@ path = "src/main.rs"
 hex.workspace = true
 qrcode.workspace = true
 refineid-rapp-core.workspace = true
-refineid-windows-credential-store.workspace = true
 
 [lints]
 workspace = true
