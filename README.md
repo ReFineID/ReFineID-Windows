@@ -173,7 +173,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 ## Remote authorization (RAPP)
 
 `crates/refineid-rapp-core` implements the requester role of the Remote
-Authorization Proxy Protocol, review draft 26.8.16.85, vendored verbatim
+Authorization Proxy Protocol, review draft 26.8.17.135, vendored verbatim
 under `docs/protocol/`. RAPP lets this Windows machine use an identity
 card held by the holder's phone: pairing starts from a high-entropy QR
 offer, every channel is a mutually authenticated Noise session, each
@@ -181,9 +181,13 @@ operation is typed and explicitly approved on the phone, and no CAN,
 PIN, or private key ever reaches the requester. The crate carries the
 deterministic CBOR wire form, both handshakes, the full message schema,
 the transcribed state-machine tables the engine is checked against, and
-a loopback conformance suite. The phone-side proxies live in their own
-platform repositories; the bridge from the minidriver to a RAPP-backed
-remote card is future work here.
+a loopback conformance suite. The crate also implements
+the `fi.refineid.stream.v1` transport profile: the listener, the rendezvous
+preamble, and the offer candidate parameters, replayed against the vendored
+conformance corpus. `refineid-rapp-cli` is the development requester that
+proves the live path against a phone proxy. The phone-side proxies live in
+their own platform repositories; the bridge from the minidriver to a
+RAPP-backed remote card is future work here.
 
 ## Security boundary
 
