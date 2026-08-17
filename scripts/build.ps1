@@ -14,7 +14,11 @@
 
 [CmdletBinding()]
 param(
-    [string[]]$Architecture = @('x64', 'arm64')
+    [string[]]$Architecture = @('x64', 'arm64'),
+    # Rust build artifacts older than this many days are pruned before the
+    # build. cargo never garbage-collects target/, so stale dependency and
+    # toolchain outputs accumulate for weeks. Set to 0 to skip pruning.
+    [int]$PruneStaleDays = 7
 )
 
 Set-StrictMode -Version Latest
@@ -45,6 +49,37 @@ $targets = [ordered]@{
     arm64 = 'aarch64-pc-windows-msvc'
 }
 
+# Prunes Rust build artifacts not touched in the last $Days days. Uses
+# cargo-sweep, which reads cargo's fingerprints and removes only unreferenced
+# output -- unlike deleting by modification time, which can strand an
+# incremental build. Housekeeping is best-effort: a missing tool, no network,
+# or a sweep error warns and continues rather than failing the build.
+function Invoke-StaleArtifactPrune {
+    param(
+        [Parameter(Mandatory)][System.Management.Automation.CommandInfo]$Cargo,
+        [Parameter(Mandatory)][int]$Days
+    )
+
+    if ($Days -le 0) {
+        return
+    }
+
+    if (-not (Get-Command cargo-sweep -ErrorAction SilentlyContinue)) {
+        Write-Host 'Installing cargo-sweep to prune stale Rust artifacts...'
+        & $Cargo.FullName install cargo-sweep --locked
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'cargo-sweep is unavailable; skipping the stale-artifact prune.'
+            return
+        }
+    }
+
+    Write-Host "Pruning Rust artifacts older than $Days days..."
+    & $Cargo.FullName sweep --time $Days
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning 'cargo sweep reported a problem; continuing with the build.'
+    }
+}
+
 $requested = foreach ($value in $Architecture) {
     foreach ($name in $value -split ',') {
         $normalized = $name.Trim().ToLowerInvariant()
@@ -57,6 +92,8 @@ $requested = foreach ($value in $Architecture) {
 
 Push-Location $repositoryRoot
 try {
+    Invoke-StaleArtifactPrune -Cargo $cargo -Days $PruneStaleDays
+
     foreach ($name in $requested | Select-Object -Unique) {
         $target = $targets[$name]
         & $rustup.FullName target add $target
