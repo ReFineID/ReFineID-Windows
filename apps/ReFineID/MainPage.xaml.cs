@@ -14,6 +14,7 @@
 
 namespace ReFineID;
 
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
@@ -27,6 +28,10 @@ using Microsoft.UI.Xaml.Controls;
 /// mobile app. Remote Card and Connect Remote Reader drive the RAPP pairing
 /// ceremony and a public card read; no credential is ever handled here.
 /// </summary>
+[SuppressMessage(
+    "Performance",
+    "CA1812:Avoid uninstantiated internal classes",
+    Justification = "Instantiated by the root Frame through XAML type activation.")]
 internal sealed partial class MainPage : Page
 {
     /// <summary>The TCP port the requester listens on for the phone's dial.</summary>
