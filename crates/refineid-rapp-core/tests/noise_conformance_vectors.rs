@@ -7,12 +7,11 @@
 //! through this crate's public helpers.
 
 use refineid_rapp_core::ids::{
-    PAIR_ID_LENGTH, PairId, RENDEZVOUS_TOKEN_LENGTH, SESSION_ID_LENGTH, derive_pair_id,
-    derive_rendezvous_token, derive_session_id,
+    PAIR_ID_LENGTH, SESSION_ID_LENGTH, derive_pair_id, derive_session_id,
 };
 use refineid_rapp_core::limits::NOISE_MAX_MESSAGE;
-use refineid_rapp_core::noise::{pairing_prologue, session_prologue};
-use refineid_rapp_core::{PAIRING_SUITE, SESSION_SUITE, WIRE_VERSION};
+use refineid_rapp_core::noise::pairing_prologue;
+use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use serde::Deserialize;
 use snow::params::{DHChoice, NoiseParams};
 use snow::resolvers::{CryptoResolver, DefaultResolver};
@@ -22,7 +21,7 @@ mod corpus_util;
 use corpus_util::{CORPUS_JSON, decode_hex, fixed};
 
 /// Vectors in the `noise_handshake` section.
-const NOISE_HANDSHAKE_COUNT: usize = 2;
+const NOISE_HANDSHAKE_COUNT: usize = 1;
 
 /// The pre-shared-key slot of the pairing construction (specification
 /// Section 8.1: the bearer secret is mixed as `psk3`).
@@ -55,16 +54,9 @@ struct NoiseVector {
     messages_hex: Vec<String>,
     handshake_hash_hex: String,
     session_id_hex: String,
-    #[serde(default)]
-    pair_id_hex: Option<String>,
-    #[serde(default)]
-    rendezvous_token_hex: Option<String>,
-    #[serde(default)]
-    test_only_pairing_secret_hex: Option<String>,
-    #[serde(default)]
-    offer_hash_hex: Option<String>,
-    #[serde(default)]
-    grants_hash_hex: Option<String>,
+    pair_id_hex: String,
+    test_only_pairing_secret_hex: String,
+    offer_hash_hex: String,
 }
 
 #[test]
@@ -75,7 +67,6 @@ fn fixed_noise_transcripts_match_the_corpus() {
     for vector in &corpus.noise_handshake {
         match vector.name.as_str() {
             "pairing-xxpsk3-fixed-transcript" => verify_pairing(vector),
-            "session-kk-fixed-transcript" => verify_session(vector),
             name => panic!("unknown Noise vector {name}"),
         }
     }
@@ -92,18 +83,8 @@ fn verify_pairing(vector: &NoiseVector) {
         fixed::<X25519_KEY_LENGTH>(&vector.test_only_initiator_ephemeral_private_hex);
     let responder_ephemeral =
         fixed::<X25519_KEY_LENGTH>(&vector.test_only_responder_ephemeral_private_hex);
-    let pairing_secret = fixed::<SHA256_LENGTH>(
-        vector
-            .test_only_pairing_secret_hex
-            .as_deref()
-            .expect("the pairing vector carries the bearer secret"),
-    );
-    let offer_hash = fixed::<SHA256_LENGTH>(
-        vector
-            .offer_hash_hex
-            .as_deref()
-            .expect("the pairing vector carries the offer hash"),
-    );
+    let pairing_secret = fixed::<SHA256_LENGTH>(&vector.test_only_pairing_secret_hex);
+    let offer_hash = fixed::<SHA256_LENGTH>(&vector.offer_hash_hex);
     verify_static_public_keys(vector, &initiator_static, &responder_static);
 
     let prologue = pairing_prologue(WIRE_VERSION, &offer_hash, &vector.transport_profile)
@@ -146,92 +127,9 @@ fn verify_pairing(vector: &NoiseVector) {
     let handshake_hash = initiator.get_handshake_hash();
     assert_eq!(
         derive_pair_id(handshake_hash).0,
-        fixed::<PAIR_ID_LENGTH>(
-            vector
-                .pair_id_hex
-                .as_deref()
-                .expect("the pairing vector carries the pair identifier")
-        ),
+        fixed::<PAIR_ID_LENGTH>(&vector.pair_id_hex),
         "derived pair identifier"
     );
-    assert_eq!(
-        derive_rendezvous_token(handshake_hash).0,
-        fixed::<RENDEZVOUS_TOKEN_LENGTH>(
-            vector
-                .rendezvous_token_hex
-                .as_deref()
-                .expect("the pairing vector carries the rendezvous token")
-        ),
-        "derived rendezvous token"
-    );
-}
-
-/// Replays the session handshake transcript.
-fn verify_session(vector: &NoiseVector) {
-    assert_eq!(vector.suite, SESSION_SUITE, "session suite name");
-    let initiator_static =
-        fixed::<X25519_KEY_LENGTH>(&vector.test_only_initiator_static_private_hex);
-    let responder_static =
-        fixed::<X25519_KEY_LENGTH>(&vector.test_only_responder_static_private_hex);
-    let initiator_ephemeral =
-        fixed::<X25519_KEY_LENGTH>(&vector.test_only_initiator_ephemeral_private_hex);
-    let responder_ephemeral =
-        fixed::<X25519_KEY_LENGTH>(&vector.test_only_responder_ephemeral_private_hex);
-    let pair_id = PairId(fixed::<PAIR_ID_LENGTH>(
-        vector
-            .pair_id_hex
-            .as_deref()
-            .expect("the session vector carries the pair identifier"),
-    ));
-    let grants_hash = fixed::<SHA256_LENGTH>(
-        vector
-            .grants_hash_hex
-            .as_deref()
-            .expect("the session vector carries the grants hash"),
-    );
-    let initiator_public = verify_static_public_keys(vector, &initiator_static, &responder_static);
-    let responder_public = public_key(&responder_static);
-
-    let prologue = session_prologue(
-        WIRE_VERSION,
-        pair_id,
-        &grants_hash,
-        &vector.transport_profile,
-    )
-    .expect("session prologue must encode");
-    assert_eq!(
-        prologue,
-        decode_hex(&vector.prologue_hex),
-        "session prologue bytes"
-    );
-
-    let parameters: NoiseParams = SESSION_SUITE.parse().expect("session suite must parse");
-    let mut initiator = Builder::new(parameters.clone())
-        .local_private_key(&initiator_static)
-        .expect("initiator static key")
-        .remote_public_key(&responder_public)
-        .expect("initiator remote key")
-        .fixed_ephemeral_key_for_testing_only(&initiator_ephemeral)
-        .prologue(&prologue)
-        .expect("initiator prologue")
-        .build_initiator()
-        .expect("session initiator");
-    let mut responder = Builder::new(parameters)
-        .local_private_key(&responder_static)
-        .expect("responder static key")
-        .remote_public_key(&initiator_public)
-        .expect("responder remote key")
-        .fixed_ephemeral_key_for_testing_only(&responder_ephemeral)
-        .prologue(&prologue)
-        .expect("responder prologue")
-        .build_responder()
-        .expect("session responder");
-
-    let messages = vec![
-        transfer(&mut initiator, &mut responder),
-        transfer(&mut responder, &mut initiator),
-    ];
-    verify_completion(vector, &initiator, &responder, &messages);
 }
 
 /// Asserts the transcript, hash, derived session identifier, and mutually

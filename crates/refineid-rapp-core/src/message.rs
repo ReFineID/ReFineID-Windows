@@ -40,8 +40,6 @@ const KEY_REQUESTED_PROFILES: &str = "requested_profiles";
 const KEY_GRANTED_PROFILES: &str = "granted_profiles";
 /// Body key: an abort, cancel, or close reason.
 const KEY_REASON: &str = "reason";
-/// Body key: the ready nonce.
-const KEY_NONCE: &str = "nonce";
 /// Body key: the highest sequence received.
 const KEY_LAST_RECEIVED_SEQUENCE: &str = "last_received_sequence";
 /// Body key: a liveness challenge.
@@ -76,11 +74,10 @@ const KEY_OFFER_HASH: &str = "offer_hash";
 const KEY_TRANSPORT_PROFILE: &str = "transport_profile";
 /// Parameter key: the connected candidate.
 const KEY_CANDIDATE_ID: &str = "candidate_id";
-/// Parameter key: the bound grants hash.
-const KEY_GRANTS_HASH: &str = "grants_hash";
 
-/// The registered error name for a displaced second session.
-pub const ERROR_BUSY: &str = "busy";
+/// The registered error name answering an authenticated `operation.request`
+/// that finds the single operation slot occupied: refused, no state change.
+pub const ERROR_RESERVED: &str = "reserved";
 /// The registered error name for a stale operation reference.
 pub const ERROR_UNKNOWN_OPERATION: &str = "unknown_operation";
 
@@ -117,12 +114,13 @@ pub enum CloseReason {
     /// Local policy closed the session.
     Policy,
     /// The card rejected CAN, PIN 1, or PIN 2 (Section 13.4); the pairing
-    /// is revoked on both peers.
+    /// ends on both peers.
     CredentialRejected,
-    /// An authenticated protocol violation closed the session and revoked
-    /// the pairing; the peer must mark its record revoked (Section 14.6).
+    /// An authenticated protocol violation closed the session; the reason
+    /// carries the end-of-pairing notice (Section 14.6).
     ProtocolViolation,
-    /// The pairing was revoked; the peer must mark its record revoked.
+    /// The pairing was deliberately revoked; the reason carries the
+    /// end-of-pairing notice.
     PairingRevoked,
     /// The endpoint is shutting down.
     Shutdown,
@@ -216,21 +214,6 @@ pub struct NegotiatedParameters {
     pub candidate_id: String,
 }
 
-/// The parameter echo of `session.ready` (Section 10).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SessionParameters {
-    /// The bound wire version.
-    pub version: (u64, u64),
-    /// The bound cryptographic suite name.
-    pub suite: String,
-    /// The transport profile in use.
-    pub transport_profile: String,
-    /// The connected candidate identifier.
-    pub candidate_id: String,
-    /// The bound grants hash.
-    pub grants_hash: [u8; 32],
-}
-
 /// One typed message body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {
@@ -254,13 +237,6 @@ pub enum Body {
     PairingAbort {
         /// A registered or descriptive reason label.
         reason: String,
-    },
-    /// `session.ready`.
-    SessionReady {
-        /// The parameter echo.
-        parameters: SessionParameters,
-        /// A fresh random nonce.
-        nonce: [u8; 32],
     },
     /// `session.close`.
     SessionClose {
@@ -376,7 +352,6 @@ impl Body {
             Self::PairingHello { .. } => "pairing.hello",
             Self::PairingConfirm { .. } => "pairing.confirm",
             Self::PairingAbort { .. } => "pairing.abort",
-            Self::SessionReady { .. } => "session.ready",
             Self::SessionClose { .. } => "session.close",
             Self::LivenessPing { .. } => "liveness.ping",
             Self::LivenessPong { .. } => "liveness.pong",
@@ -601,61 +576,6 @@ fn decode_negotiated(value: &Value) -> Result<NegotiatedParameters, SchemaViolat
     })
 }
 
-/// Encodes the session-parameter echo.
-fn encode_session_parameters(parameters: &SessionParameters) -> Value {
-    Value::Map(vec![
-        (
-            KEY_VERSION.into(),
-            Value::Array(vec![
-                Value::Unsigned(parameters.version.0),
-                Value::Unsigned(parameters.version.1),
-            ]),
-        ),
-        (KEY_SUITE.into(), Value::Text(parameters.suite.clone())),
-        (
-            KEY_TRANSPORT_PROFILE.into(),
-            Value::Text(parameters.transport_profile.clone()),
-        ),
-        (
-            KEY_CANDIDATE_ID.into(),
-            Value::Text(parameters.candidate_id.clone()),
-        ),
-        (
-            KEY_GRANTS_HASH.into(),
-            Value::Bytes(parameters.grants_hash.to_vec()),
-        ),
-    ])
-}
-
-/// Reads the session-parameter echo.
-fn decode_session_parameters(value: &Value) -> Result<SessionParameters, SchemaViolation> {
-    let Value::Map(entries) = value else {
-        return Err(SchemaViolation::WrongFieldType);
-    };
-    let mut version = None;
-    let mut suite = None;
-    let mut transport_profile = None;
-    let mut candidate_id = None;
-    let mut grants_hash = None;
-    for (key, entry) in entries {
-        match key.as_str() {
-            KEY_VERSION => version = Some(read_version(entry)?),
-            KEY_SUITE => suite = Some(read_text(entry)?),
-            KEY_TRANSPORT_PROFILE => transport_profile = Some(read_text(entry)?),
-            KEY_CANDIDATE_ID => candidate_id = Some(read_text(entry)?),
-            KEY_GRANTS_HASH => grants_hash = Some(read_fixed::<32>(entry)?),
-            _ => return Err(SchemaViolation::UnknownField),
-        }
-    }
-    Ok(SessionParameters {
-        version: version.ok_or(SchemaViolation::MissingField)?,
-        suite: suite.ok_or(SchemaViolation::MissingField)?,
-        transport_profile: transport_profile.ok_or(SchemaViolation::MissingField)?,
-        candidate_id: candidate_id.ok_or(SchemaViolation::MissingField)?,
-        grants_hash: grants_hash.ok_or(SchemaViolation::MissingField)?,
-    })
-}
-
 /// Encodes one body as its wire map.
 #[allow(
     clippy::too_many_lines,
@@ -689,10 +609,6 @@ fn encode_body(body: &Body) -> Value {
         Body::PairingAbort { reason } => {
             Value::Map(vec![(KEY_REASON.into(), Value::Text(reason.clone()))])
         }
-        Body::SessionReady { parameters, nonce } => Value::Map(vec![
-            (KEY_PARAMETERS.into(), encode_session_parameters(parameters)),
-            (KEY_NONCE.into(), Value::Bytes(nonce.to_vec())),
-        ]),
         Body::SessionClose {
             reason,
             last_received_sequence,
@@ -890,21 +806,6 @@ fn decode_body(message_type: &str, value: &Value) -> Result<Body, SchemaViolatio
             }
             Ok(Body::PairingAbort {
                 reason: reason.ok_or(SchemaViolation::MissingField)?,
-            })
-        }
-        "session.ready" => {
-            let mut parameters = None;
-            let mut nonce = None;
-            for (key, entry) in entries {
-                match key.as_str() {
-                    KEY_PARAMETERS => parameters = Some(decode_session_parameters(entry)?),
-                    KEY_NONCE => nonce = Some(read_fixed::<32>(entry)?),
-                    _ => return Err(SchemaViolation::UnknownField),
-                }
-            }
-            Ok(Body::SessionReady {
-                parameters: parameters.ok_or(SchemaViolation::MissingField)?,
-                nonce: nonce.ok_or(SchemaViolation::MissingField)?,
             })
         }
         "session.close" => {
@@ -1128,10 +1029,7 @@ fn decode_body(message_type: &str, value: &Value) -> Result<Body, SchemaViolatio
     reason = "test vectors are constructed to be infallible"
 )]
 mod tests {
-    use super::{
-        Body, CloseReason, Envelope, NegotiatedParameters, ResultStatus, SchemaViolation,
-        SessionParameters,
-    };
+    use super::{Body, CloseReason, Envelope, NegotiatedParameters, ResultStatus, SchemaViolation};
     use crate::WIRE_VERSION;
     use crate::cbor::Value;
     use crate::ids::{Challenge, OperationId, SessionId};
@@ -1166,16 +1064,6 @@ mod tests {
         });
         round_trip(Body::PairingAbort {
             reason: "denied".into(),
-        });
-        round_trip(Body::SessionReady {
-            parameters: SessionParameters {
-                version: WIRE_VERSION,
-                suite: crate::SESSION_SUITE.into(),
-                transport_profile: "fi.refineid.memory.v1".into(),
-                candidate_id: "c-1".into(),
-                grants_hash: [2; 32],
-            },
-            nonce: [3; 32],
         });
         round_trip(Body::SessionClose {
             reason: CloseReason::UserDisconnect,

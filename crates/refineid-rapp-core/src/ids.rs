@@ -19,8 +19,6 @@ pub const PAIR_ID_LENGTH: usize = 16;
 pub const SESSION_ID_LENGTH: usize = 16;
 /// Bytes in a random operation identifier.
 pub const OPERATION_ID_LENGTH: usize = 16;
-/// Bytes in a derived transport rendezvous token.
-pub const RENDEZVOUS_TOKEN_LENGTH: usize = 16;
 /// Bytes in a random liveness challenge.
 pub const CHALLENGE_LENGTH: usize = 32;
 
@@ -28,8 +26,6 @@ pub const CHALLENGE_LENGTH: usize = 32;
 const SESSION_ID_DOMAIN: &[u8] = b"RAPP-session-id-v1";
 /// Domain-separation prefix for the derived pair identifier.
 const PAIR_ID_DOMAIN: &[u8] = b"RAPP-pair-id-v1";
-/// Domain-separation prefix for the derived transport rendezvous token.
-const RENDEZVOUS_TOKEN_DOMAIN: &[u8] = b"RAPP-rendezvous-v1";
 
 /// The random-generator failure surfaced by identifier creation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,21 +78,15 @@ impl core::fmt::Debug for PairingSecret {
     }
 }
 
-/// The derived 16-byte identifier naming one stored peer relationship.
+/// The derived 16-byte identifier naming one live pairing in memory. It
+/// never appears on the wire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PairId(pub [u8; PAIR_ID_LENGTH]);
 
-/// The derived 16-byte identifier scoping one authenticated channel.
+/// The derived 16-byte identifier scoping the authenticated channel for its
+/// whole life, from `pairing.hello` through the last session message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionId(pub [u8; SESSION_ID_LENGTH]);
-
-/// The derived 16-byte pair-specific rendezvous token (Section 8.5).
-///
-/// Transports that must name a pairing on the wire carry this value, never
-/// `PairId`; the two are computationally unlinkable without the handshake
-/// hash.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RendezvousToken(pub [u8; RENDEZVOUS_TOKEN_LENGTH]);
 
 /// A random 16-byte identifier scoping one semantic operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,13 +139,6 @@ pub fn derive_session_id(handshake_hash: &[u8]) -> SessionId {
 #[must_use]
 pub fn derive_pair_id(handshake_hash: &[u8]) -> PairId {
     PairId(derive_sixteen(PAIR_ID_DOMAIN, handshake_hash))
-}
-
-/// Derives the transport rendezvous token from a completed pairing
-/// handshake hash.
-#[must_use]
-pub fn derive_rendezvous_token(handshake_hash: &[u8]) -> RendezvousToken {
-    RendezvousToken(derive_sixteen(RENDEZVOUS_TOKEN_DOMAIN, handshake_hash))
 }
 
 #[cfg(test)]

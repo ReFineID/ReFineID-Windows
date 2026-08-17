@@ -42,14 +42,15 @@ is remote.
 ## Staging
 
 1. **Wire path** — done. `refineid-rapp-core` implements the requester
-   role against vendored draft 26.8.17.135 with the conformance corpus
-   replayed; `refineid-rapp pair-demo` proves pairing, sessions, and
-   typed operations against a real phone from a terminal.
-2. **Durable pairing** — next. A `PairingStore` implementation over the
-   Windows credential store (pair keys device-only, never roaming, the
-   revoked record kept as the tombstone), and the pairing ceremony in
-   ReFineID Settings: QR display, both-device grant confirmation, the
-   paired-phones list, forget and revoke.
+   role against vendored draft 26.8.17.213 with the conformance corpus
+   replayed; `refineid-rapp pair-demo` proves the pairing whose channel
+   continues as the session, and typed operations over it, against a
+   real phone from a terminal.
+2. **Ephemeral pairing lifecycle** — a pairing is its live connection:
+   pair keys exist only in memory, every close ends the pairing on both
+   peers, and nothing pairing-related is stored at rest. The pairing
+   ceremony in ReFineID Settings: QR display, both-device grant
+   confirmation, the live-pairing display, forget.
 3. **Minidriver remote arm** — the `CardSessionTransport::Remote`
    variant backed by the requester engine, certificate caching at
    pairing time so `CardAcquireContext` can build its model without a
@@ -64,7 +65,7 @@ is remote.
 ## What never changes
 
 The requester never renders or collects CAN, PIN, or PUK; a credential
-rejection or an authenticated protocol violation revokes the pairing on
-both peers; an ambiguous operation is never retried; and one pairing
-serves one session at a time. The strictness is the security design:
+rejection or an authenticated protocol violation ends the pairing on
+both peers; an ambiguous operation is never retried; and one pairing is
+one connection is one session. The strictness is the security design:
 when in doubt, the bridge breaks visibly and the holder pairs again.

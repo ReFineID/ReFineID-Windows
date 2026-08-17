@@ -2,13 +2,13 @@
 
 Status: External-review draft  
 Intended status: Experimental  
-Document version: 26.8.17.135  
-Supersedes: 26.8.16.85  
-Protocol wire version: 0.1-draft  
+Document version: 26.8.17.213  
+Supersedes: 26.8.17.135  
+Protocol wire version: 26.8 (wire tuple `[26, 8]`)  
 Date: 2026-08-17  
 Change controller: ReFineID project  
-Companion model: [RAPP state machine 26.8.17.135](rapp-state-machine-v26.8.17.135.yaml)  
-Conformance corpus: [RAPP vectors 26.8.17.135](vectors/rapp-v26.8.17.135.json)
+Companion model: [RAPP state machine 26.8.17.213](rapp-state-machine-v26.8.17.213.yaml)  
+Conformance corpus: [RAPP vectors 26.8.17.213](vectors/rapp-v26.8.17.213.json)
 
 ## Abstract
 
@@ -28,10 +28,12 @@ most once. RAPP never exposes CAN, PIN, or PUK values to the requester. A card
 rejection of CAN, PIN 1, or PIN 2 immediately terminates the RAPP session and
 prohibits automatic recovery.
 
-Network faults that cannot be attributed to the authenticated peer close at
-most the current session. Destruction of a stored pairing requires either an
-explicit local decision or a protocol violation proven to originate from the
-authenticated peer.
+A pairing lives only for the life of its authenticated, liveness-maintained
+connection. Any loss of that connection — from any cause, attributable or not —
+ends the pairing on both peers and destroys the in-memory pair keys; this is
+the intended dead-man's switch. Recovery is always a fresh QR pairing ceremony,
+never an automatic reconnect. Unauthenticated or unattributable input can never
+forge a pairing, open a session, or issue a credential command.
 
 This document defines the roles, trust boundaries, wire representation,
 cryptographic construction, pairing and session protocols, operation model,
@@ -101,14 +103,14 @@ RAPP is not:
 The **Requester** asks for a typed credential operation. Examples include a
 browser authentication agent, a document-signing application, or an
 administrator requesting a PIN-management operation. The requester is the
-Noise initiator in RAPP 0.1.
+Noise initiator in this version of RAPP.
 
 ### 3.2 Authorization Proxy
 
 The **Authorization Proxy** presents the operation to the user, obtains any
 required credential locally, communicates with the credential holder, and
 returns only the profile-defined result. A phone is the expected first proxy.
-The proxy is the Noise responder in RAPP 0.1.
+The proxy is the Noise responder in this version of RAPP.
 
 ### 3.3 Credential Holder
 
@@ -128,8 +130,9 @@ The OPTIONAL **Rendezvous Relay** routes opaque RAPP ciphertext when peers
 cannot communicate directly. The relay is outside the cryptographic trust
 boundary. It MUST NOT receive pairing secrets, session keys, card access
 codes, operation plaintext, card identifiers, certificates, or results. A
-relay can delay or destroy sessions; it MUST NOT be able to destroy a stored
-pairing.
+relay can delay or destroy the connection, which ends the pairing carried on
+it (Section 17); it MUST NOT be able to forge, hijack, or resurrect a
+pairing, or affect any state beyond the connection it carries.
 
 ### 3.6 Relying Party
 
@@ -182,16 +185,18 @@ pairing, operation freshness, typed authorization context, credential custody,
 and at-most-once credential transmission. It limits a malicious paired
 requester through explicit proxy consent and profile grants. It prevents an
 unauthenticated party, including the relay, from consuming a pairing offer,
-revoking a stored pairing, or learning pairing-payload content.
+forging a pairing, or learning pairing-payload content.
 
 ### 4.4 Explicit residual risks
 
 RAPP cannot prevent denial of service, endpoint compromise, misleading context
 provided by an unattested requester, shoulder-surfing of a pairing QR, or
 traffic analysis by a relay. A relay or on-path attacker can force any number
-of session closures; RAPP bounds the damage to reconnection effort and never
-to pairing loss. A profile MUST distinguish independently verified context
-from requester-asserted display text.
+of connection closures; because a pairing is its live connection, each closure
+ends the pairing, and the damage is bounded to performing a fresh QR pairing —
+never to silent compromise, impersonation, or credential exposure. A profile
+MUST distinguish independently verified context from requester-asserted display
+text.
 
 ## 5. Layered architecture
 
@@ -217,7 +222,7 @@ encrypted.
 | --- | ---: | --- | --- |
 | `offer_id` | 32 bytes | random | one pairing offer |
 | `pairing_secret` | 32 bytes | random | one pairing offer |
-| `pair_id` | 16 bytes | derived, Section 8.5 | one stored peer relationship |
+| `pair_id` | 16 bytes | derived, Section 8.5 | one live peer relationship |
 | `session_id` | 16 bytes | derived, Section 8.5 | one authenticated channel |
 | `operation_id` | 16 bytes | random | one semantic operation |
 | `challenge` | 32 bytes | random | one liveness exchange |
@@ -233,7 +238,7 @@ account, hardware serial number, or globally stable device identifier.
 The wire version is a two-element `[major, minor]` array. A major-version
 difference is incompatible. A minor version may add non-critical fields only.
 Version and capability selection are authenticated as part of the Noise
-handshake transcript. RAPP 0.1 permits no silent downgrade and no 0-RTT
+handshake transcript. This version of RAPP permits no silent downgrade and no 0-RTT
 operation data.
 
 ## 7. Wire representation
@@ -282,7 +287,6 @@ message-type =
     "pairing.hello"
   / "pairing.confirm"
   / "pairing.abort"
-  / "session.ready"
   / "session.close"
   / "liveness.ping"
   / "liveness.pong"
@@ -349,9 +353,12 @@ allocation.
 The mandatory suite is:
 
 ```text
-Pairing: Noise_XXpsk3_25519_ChaChaPoly_SHA256
-Session: Noise_KK_25519_ChaChaPoly_SHA256
+Noise_XXpsk3_25519_ChaChaPoly_SHA256
 ```
+
+RAPP has exactly one handshake: the pairing handshake. The authenticated
+channel it creates continues as the live session (Section 10); there is no
+second construction and no session handshake.
 
 The construction follows the [Noise Protocol Framework, revision
 34](https://noiseprotocol.org/noise.html). X25519 is specified by
@@ -378,7 +385,7 @@ Every value in a Noise prologue MUST be known to both peers before the
 handshake begins. The prologue is the deterministic-CBOR encoding of a
 fixed-order array:
 
-For the pairing handshake:
+For the one handshake:
 
 ```cddl
 pairing-prologue = [
@@ -390,73 +397,54 @@ pairing-prologue = [
 ]
 ```
 
-For a session handshake:
-
-```cddl
-session-prologue = [
-  "RAPP-session-v1",
-  [uint, uint],          ; wire version
-  tstr,                  ; cryptographic suite name
-  bstr .size 16,         ; pair_id, Section 8.5
-  bstr .size 32,         ; grants_hash, Section 8.5
-  tstr                   ; transport profile name
-]
-```
-
 Changing any bound value makes the handshake fail. The selected transport
 candidate is not in the prologue because a listening endpoint may not know
 which advertised candidate an incoming connection used; the transport profile
 MUST make the candidate identifier available to both endpoints, and it is
 echoed and compared inside the first authenticated message of the channel
-(`pairing.hello` or `session.ready`).
+(`pairing.hello`).
 
 In `Noise_XXpsk3` the pre-shared key is mixed only at the third handshake
 message, so earlier handshake payloads are readable or decryptable by an
 active unauthenticated initiator. For this reason every RAPP handshake
-message, in both patterns, MUST carry an empty payload. Names, platform
+message MUST carry an empty payload. Names, platform
 descriptions, grants, and parameter echoes are exchanged only after the
 handshake completes, inside ordinary encrypted envelopes. A received
 handshake message with a non-empty payload MUST abort the handshake.
 
 ### 8.4 Derived values are compared explicitly
 
-Immediately after a handshake completes, each peer sends the first
-authenticated message of the channel (`pairing.hello` or `session.ready`)
+Immediately after the handshake completes, each peer sends the first
+authenticated message of the channel (`pairing.hello`)
 echoing the negotiated parameters it believes were bound. A mismatch is an
 authenticated protocol violation. This detects implementation disagreement
 that a transcript failure cannot explain to a user.
 
 ### 8.5 Derived identifiers and defined hashes
 
-Let `h` be the Noise handshake hash of a completed handshake as defined by the
-Noise framework. Both peers derive, in this order:
+Let `h` be the Noise handshake hash of the completed handshake as defined by
+the Noise framework. Both peers derive, in this order:
 
 ```text
-session_id       = first 16 bytes of SHA-256("RAPP-session-id-v1" || h)
-pair_id          = first 16 bytes of SHA-256("RAPP-pair-id-v1" || h)
-rendezvous_token = first 16 bytes of SHA-256("RAPP-rendezvous-v1" || h)
+session_id = first 16 bytes of SHA-256("RAPP-session-id-v1" || h)
+pair_id    = first 16 bytes of SHA-256("RAPP-pair-id-v1" || h)
 ```
 
-`session_id` is derived from every completed handshake, including the pairing
-handshake, and scopes the envelope of that channel. `pair_id` is derived only
-from the pairing handshake and permanently names the stored relationship.
-`rendezvous_token` is likewise derived only from the pairing handshake and is
-stored beside the pairing for transport profiles that need pair-specific
-rendezvous (Sections 16.1 and 17). It exists so that a transport can name a
-pairing on the wire without ever exposing `pair_id`, which remains a local
-identifier; the two values are computationally unlinkable without `h`.
-Destroying a pairing destroys its rendezvous token.
-Because `h` mixes the prologue, which contains `offer_hash` over content that
-never crosses the network, a network observer cannot compute either value.
+Both identifiers come from the one handshake. `session_id` scopes the
+envelopes of the authenticated channel for its whole life, from
+`pairing.hello` through the last session message. `pair_id` names the pairing
+locally for its in-memory lifetime and in journal records; it never appears
+on the wire. Because `h` mixes the prologue, which contains `offer_hash` over
+content that never crosses the network, a network observer cannot compute
+either value.
 
 `offer_hash` is SHA-256 over the deterministic-CBOR encoding of the
 `pairing-offer` map (Section 9.2) with the `pairing_secret` entry removed.
 The bearer secret contributes to the handshake only as the pre-shared key.
 
-`grants_hash` is SHA-256 over the deterministic-CBOR encoding of the array of
-granted credential-profile names sorted lexicographically by their UTF-8
-bytes. Both peers store it at pairing confirmation and bind it in every later
-session prologue, so a grant mismatch fails the session handshake.
+The granted profile set is not hashed into any prologue: it is agreed inside
+the authenticated channel through the equal `pairing.confirm` sets
+(Section 9.4) and held in memory beside the pair keys.
 
 `request_hash` is SHA-256 over the deterministic-CBOR encoding of the
 fixed-order array:
@@ -551,10 +539,14 @@ its use as the handshake pre-shared key ends.
    selects the granted profile set; both devices then display it with an
    explicit confirmation control and exchange `pairing.confirm`. The two
    granted sets MUST be equal.
-8. Only after both confirmations does each endpoint atomically store the
-   pair-specific keys, `pair_id`, granted profiles, `grants_hash`, and local
-   metadata. The pairing channel is then closed; operations use fresh
-   sessions.
+8. Only after both confirmations does each endpoint hold, in memory only, the
+   pair-specific keys, `pair_id`, granted profiles, and local metadata.
+   Nothing pairing-related is written at rest. The authenticated channel then
+   continues, without any further handshake, as the live session that carries
+   operations (Section 10), and authenticated liveness (Section 11) begins;
+   the pairing exists only for as long as that connection stays live under
+   liveness. When the connection ends, the in-memory keys are destroyed and the
+   pairing is gone.
 9. The requester invalidates the offer on the first completed authenticated
    handshake, user cancellation, or local monotonic expiry — and on nothing
    else.
@@ -612,61 +604,36 @@ derive an accessible comparison representation from the final Noise handshake
 hash. Such a representation is an additional human check and MUST NOT reduce
 the cryptographic entropy used by the protocol.
 
-## 10. Session establishment
+## 10. Session lifecycle
 
-A paired requester opens a new transport only after explicit user or
-application action. RAPP 0.1 does not automatically reconnect a closed
-session.
+RAPP has no separate session establishment. The authenticated channel created
+by the pairing handshake continues, at the moment both confirmations complete
+(Section 9.3, step 8), as the live session that carries operations: one
+handshake, one connection, one session, for the pairing's whole life. A
+pairing is that single live, liveness-maintained connection, and its keys live
+only in memory (Sections 9.3, 11, 14.2). There is no remembered pairing to
+reconnect to: once the connection closes, the session and the pairing are gone
+together, and the only recovery is a fresh QR pairing ceremony.
 
-1. The requester selects one mutually stored transport profile and initiates
-   the session over it. Which endpoint opens the underlying connection is a
-   property of the transport profile (Section 16): the requester dials on a
-   profile whose stored candidate names a proxy-side rendezvous, and it
-   accepts on a profile whose stored candidate names a requester-side
-   listener. Logical Noise roles are unaffected by connection direction.
-2. The accepting endpoint associates the connection with a stored pairing
-   through the transport's pair-specific rendezvous (for example, its relay
-   token, candidate parameters, or rendezvous preamble). If the transport
-   cannot indicate the pairing and the accepting endpoint is the proxy, it
-   MAY trial-process the first handshake message against each stored
-   pairing; exactly one can authenticate. An accepting requester has no
-   trial-processing option, because the requester sends the first handshake
-   message; its transport profile MUST indicate the pairing before the
-   handshake begins.
-3. The peers run the mandatory `Noise_KK` handshake with their pair-specific
-   static keys, fresh ephemeral keys, the session prologue of Section 8.3, and
-   empty handshake payloads.
-4. Both peers derive `session_id` (Section 8.5) and each sends an encrypted
-   `session.ready`:
+Nothing is renegotiated when confirmation completes. `session_id`
+(Section 8.5) already scopes every envelope on the channel from
+`pairing.hello` onward and does not change. The negotiated parameters were
+echoed and compared in `pairing.hello` (Section 8.4), and the granted
+profiles were fixed by the equal `pairing.confirm` sets (Section 9.4). The
+session is `healthy` immediately, and authenticated liveness (Section 11)
+begins.
 
-   ```cddl
-   session-ready = {
-     "parameters": session-parameters,
-     "nonce": bstr .size 32
-   }
+No application operation is permitted before both confirmations complete.
+This version of RAPP has no 0-RTT data, session resumption, connection
+migration, or mid-session transport fallback. A new transport requires a new
+pairing ceremony.
 
-   session-parameters = {
-     "version": [uint, uint],
-     "suite": tstr,
-     "transport_profile": tstr,
-     "candidate_id": tstr,
-     "grants_hash": bstr .size 32
-   }
-   ```
-
-5. The session becomes `healthy` only after each peer has verified that the
-   received parameters equal its own view. A mismatch is an authenticated
-   protocol violation.
-
-No application operation is permitted during connection or authentication.
-RAPP 0.1 has no 0-RTT data, session resumption, connection migration, or
-mid-session transport fallback. A new transport requires a new session and
-fresh handshake.
-
-Only the requester initiates a normal session. If a proxy with a live session
-for a pairing receives a second session attempt for the same pairing, it
-completes the handshake, sends an authenticated `error` with name `busy`, and
-closes the new session; the existing session is not displaced.
+While a pairing is live, nothing exists for a further connection to attach
+to: the requester has no active offer, and there is no session handshake. An
+additional connection attempt during a live pairing is therefore refused
+before authentication (Section 14.5, class 1) and has no effect on the live
+pairing. A new inbound connection is honored only while a new offer is
+active.
 
 A `session.close` body is:
 
@@ -687,22 +654,21 @@ close-reason =
 
 A peer that receives `session.close` enters `closing`, stops sending
 application messages, and completes its own close. The reasons
-`pairing_revoked` and `protocol_violation` additionally carry the pairing
-revocation notice of Section 14.6.
+`pairing_revoked` and `protocol_violation` additionally carry the
+end-of-pairing notice of Section 14.6.
 
 ## 11. Visible liveness
 
 Both peers MUST continuously expose one of these localized states while RAPP is
 active:
 
-- Paired, disconnected
 - Connecting
 - Verifying secure connection
 - Connected
 - Checking connection
 - Disconnecting
 - Connection stopped
-- Pairing revoked
+- Pairing ended
 
 Color and animation MAY supplement but MUST NOT be the only distinction.
 Reduced-motion settings and assistive technologies MUST receive equivalent
@@ -731,12 +697,17 @@ transport keepalive alone MUST NOT produce a Connected state.
 
 An unanswered liveness exchange moves the session to `checking`, blocks new
 operations, and uses exponential backoff with jitter. A valid response restores
-`healthy`. A local hard deadline closes the session. Exact heartbeat intervals,
-backoff limits, and deadlines are injected policy values to be determined by
-measurement; they are not UI delays and MUST use a monotonic clock.
+`healthy`. A local hard deadline closes the session and, because a pairing is
+nothing more than its live liveness-maintained connection, destroys the
+in-memory pair keys on both peers. Exact heartbeat intervals, backoff limits,
+and deadlines are injected policy values to be determined by measurement; they
+are not UI delays and MUST use a monotonic clock.
 
-Ordinary connectivity loss closes the session but preserves pairing. Recovery
-requires an explicit new session. It MUST NOT silently change transports.
+Any loss of the live connection -- ordinary connectivity loss or the liveness
+hard deadline -- ends the pairing. Both peers destroy their in-memory pair keys;
+nothing pairing-related is preserved and there is nothing to reconnect to.
+Recovery is a fresh pairing ceremony, never an automatic reconnect. A live
+connection MUST NOT silently change transports.
 
 ## 12. Operation protocol
 
@@ -879,14 +850,15 @@ other operation message that references an unknown or already terminal
 The result is bound to the operation identifier and request hash. Losing the
 session after a `completed`-status result exists but before acknowledgment
 produces `delivery_uncertain` on the proxy. The proxy may retain such a result
-encrypted under local platform storage for later status reporting, but RAPP
-0.1 does not automatically reopen a session or redeliver it. It never repeats
-the card command.
+encrypted under local platform storage for its own later reference, but this
+version of RAPP does not reopen a session or redeliver it: losing the session ends the
+pairing, so there is no reconnection over which redelivery could occur. It
+never repeats the card command.
 
 ### 12.6 Status reconciliation
 
-After a reconnection, a requester holding a non-terminal journal entry or an
-`ambiguous` record from an earlier session MAY query the proxy:
+Within the live session, a requester holding a non-terminal journal entry or an
+`ambiguous` record MAY query the proxy:
 
 ```cddl
 operation-status-request = {
@@ -901,12 +873,18 @@ operation-status = {
 }
 ```
 
-The proxy answers from its durable journal; a status query never touches the
-card. `state` is the journaled terminal state name. The requester's terminal
-record keeps its own state; the authenticated report is stored as a journal
-annotation that resolves the practical question — whether the card command
-executed — without transitioning any machine. New work requires a new
-`operation_id` and fresh consent in every case.
+The proxy answers from its journal; a status query never touches the card.
+`state` is the journaled terminal state name. The requester's terminal record
+keeps its own state; the authenticated report is stored as a journal annotation
+that resolves the practical question — whether the card command executed —
+without transitioning any machine.
+
+Reconciliation is confined to the live session because a pairing does not
+survive a lost connection: a requester that loses the session loses the pairing
+and cannot reconnect to reconcile. An operation left ambiguous by a dropped
+connection can only be re-checked by inspecting the card itself after a fresh
+pairing. New work requires a new `operation_id` and fresh consent in every
+case.
 
 ## 13. Credential profiles
 
@@ -1049,13 +1027,15 @@ command — the proxy MUST:
 5. for invalid CAN, remove stored CAN and card-derived identity state;
 6. send only the profile's bounded `credential_rejected` result when the
    authenticated channel is still usable;
-7. durably destroy the pairing keys and write a pairing tombstone after that
-   bounded result has been sealed; and
+7. destroy the in-memory pairing keys after that bounded result has been
+   sealed; nothing pairing-related is written at rest, so there is no
+   tombstone to record; and
 8. move the RAPP session immediately to `closing`.
 
 The authenticated requester that receives `credential_rejected` MUST also
-durably destroy its pairing keys and write a tombstone before reporting the
-terminal result. Recovery requires a new manual pairing ceremony; there is no
+destroy its in-memory pairing keys before reporting the terminal result.
+Because a pairing is only its live connection, this ends the pairing on both
+peers. Recovery requires a new manual QR pairing ceremony; there is no
 automatic reconnect or two-incident grace policy.
 
 PIN 2 is never cached. A PIN 2 rejection still clears the entry and all other
@@ -1064,7 +1044,8 @@ convenience entry. The authorization proxy MAY show the locally known retry
 count; the requester receives only information allowed by the profile.
 
 Card rejection is not, by itself, evidence that the paired network peer is
-malicious. The device pairing therefore remains `paired_disconnected`.
+malicious. It neither closes the session nor ends the pairing: the session
+remains healthy and the pairing remains `paired_connected`.
 
 ### 13.5 Activation and partial completion
 
@@ -1097,12 +1078,13 @@ specification revision rather than an implementation guess.
 
 The machines describe instances, not singletons:
 
-- a **pairing instance** exists per stored or in-progress peer relationship;
+- a **pairing instance** exists per live or in-progress peer relationship;
   `unpaired` is the absence of an instance, and a new offer or scan creates a
   new instance with fresh keys;
-- a **session instance** exists per connection attempt; `absent` means no
-  live instance for the pairing, and a new instance may be created whenever
-  none is in a live state;
+- a **session instance** exists per pairing: it is the pairing's
+  authenticated channel continuing past confirmation, created directly in
+  `healthy` when both confirmations complete; `absent` means confirmation has
+  not completed, and `closed` ends the pairing with the session;
 - an **operation instance** exists per `operation_id`; `none` is the
   admission state of a new instance, terminal states are permanent journal
   records, and the single active slot (`MAX_ACTIVE_OPERATIONS`) frees when an
@@ -1129,32 +1111,39 @@ journal.
 | `offer_active` | one manual QR offer is live (requester only) |
 | `handshaking` | pairing Noise handshake is in progress |
 | `confirming` | authenticated exchange awaits both approvals |
-| `paired_disconnected` | durable pairing exists; no healthy session |
-| `paired_connected` | durable pairing exists with a healthy/checking session |
-| `revoked` | the pairing was deliberately terminated, locally or by authenticated peer notice |
+| `paired_connected` | a pairing exists: a live, liveness-maintained connection with in-memory keys |
 
-`revoked` is a fail-stop state. Existing keys cannot be reactivated. The user
-may forget the record and perform a completely new QR pairing with new keys.
-Unauthenticated traffic, failed handshakes, and frames that fail authenticated
-decryption can never revoke a stored pairing.
+A pairing exists only as `paired_connected`; there is no state in which a
+pairing outlives its live connection. `paired_connected` is the pairing. Any
+end of that connection — ordinary loss, the liveness hard deadline, a
+user disconnect, a peer close, a local forget, a local or peer revocation, or
+the first authenticated protocol violation — returns both peers to `unpaired`
+and destroys the in-memory pair keys. The pair keys cannot be reactivated and
+a dropped pairing is never re-established automatically: recovery is a new QR
+pairing ceremony with new keys, never a reconnect to a remembered pairing.
+Unauthenticated traffic and failed handshakes can never drop a live pairing.
+A frame that fails authenticated decryption on the live session is never
+blamed on the peer; it ends the pairing only by closing that session
+(Section 14.5, class 2), the way every close does.
 
 ### 14.3 Session states
 
 | State | Permitted activity |
 | --- | --- |
-| `absent` | no channel |
-| `connecting` | transport establishment only (requester side) |
-| `authenticating` | Noise handshake and `session.ready` comparison only |
+| `absent` | confirmation not complete; the channel, if any, belongs to the pairing machine |
 | `healthy` | liveness and at most one operation |
 | `checking` | liveness recovery only; new operations blocked |
 | `closing` | operation classification, best-effort close notice, key destruction |
 | `closed` | terminal session record; no traffic |
 
-Ordinary EOF, transport failure, liveness timeout, or decrypt failure closes
-only the session. The first authenticated protocol violation immediately
-revokes the pairing (Section 14.6). A peer `session.close`
-is consumed from every post-handshake state: `authenticating`, `healthy`,
-`checking`, and `closing`.
+The session has no connect or handshake states of its own: the pairing
+channel becomes the session directly in `healthy` when both confirmations
+complete (Section 10). Ordinary EOF, transport failure, liveness timeout, or
+decrypt failure closes the session, and because a pairing is nothing more
+than its live connection, the pairing ends with it: both peers destroy their
+in-memory pair keys. The first authenticated protocol violation drops the
+pairing the same way (Section 14.6). A peer `session.close` is consumed from
+every live state: `healthy`, `checking`, and `closing`.
 
 ### 14.4 Operation states
 
@@ -1188,12 +1177,13 @@ machine-readable model and its generated tests:
 
 1. **Pre-authentication invalid input** — malformed, unexpected, or
    unauthenticated data during pairing offers, connection, or handshakes:
-   discard and close only the candidate connection. Stored pairing state is
+   discard and close only the candidate connection. A live pairing's keys are
    never altered.
 2. **Established-channel integrity failure** — a frame on an authenticated
    session that fails authenticated decryption or framing: close the session
-   as `session_integrity_failed`. This is network-attributable (Section 7.3)
-   and has no pairing effect.
+   as `session_integrity_failed`. This is network-attributable (Section 7.3),
+   so no peer is blamed and no end-of-pairing notice is sent; the pairing
+   still ends with the session, as every close does.
 3. **Stale-reference race** — a successfully decrypted operation message for
    an unknown or terminal `operation_id`, a duplicate commit matching the
    committed hash, or a pong whose challenge matches no outstanding ping:
@@ -1202,37 +1192,36 @@ machine-readable model and its generated tests:
 4. **Authenticated protocol violation** — a successfully decrypted message
    with a schema violation, sequence violation, parameter-echo mismatch, or
    no legal transition outside class 3: close the session, classify the active
-   operation per Section 14.7, immediately revoke the pairing, destroy its
-   keys, and require a new manual pairing (Section 14.6). On the pairing
-   channel, before a pairing is stored, the violation instead aborts the
-   pairing attempt and records nothing.
+   operation per Section 14.7, immediately end the pairing by destroying its
+   in-memory keys, and require a new manual pairing (Section 14.6). On the
+   pairing channel, before confirmation completes, the violation instead
+   aborts the pairing attempt and leaves nothing behind.
 5. **Local internal fault** — stop local RAPP, destroy session material, and
    classify a committed operation as ambiguous without blaming the peer.
 6. **Traffic after `closed`** — discard without response.
 
-### 14.6 Immediate revocation and peer notice
+### 14.6 Immediate end of pairing and peer notice
 
 A successfully decrypted protocol violation proves that the peer holding the
 pair keys sent nonconforming traffic. The first such violation closes the
-session, moves the pairing immediately to `revoked`, destroys the pair keys,
-and requires a completely new manual QR pairing. RAPP 0.1 has no violation
-counter, grace event, automatic recovery, or restoration of revoked keys.
+session, ends the pairing immediately by destroying the in-memory pair keys,
+and requires a completely new manual QR pairing. Because a pairing is only ever
+its live connection, ending it leaves no stored record and no way to restore
+the destroyed keys. This version of RAPP has no violation counter, grace event,
+or automatic recovery.
 
-Entering `revoked` sends, while an authenticated channel still exists, one
+Ending the pairing sends, while an authenticated channel still exists, one
 best-effort `session.close` with reason `pairing_revoked` or
 `protocol_violation`, and then destroys the pair keys. A peer receiving either
-reason on an authenticated channel marks its own pairing `revoked`, records
-that the peer initiated it, closes the session, and destroys its keys; the
-pairing is dead on both sides and both users see why. When no channel exists at
-revocation time, the other peer
-discovers the loss as failed session handshakes: after three consecutive
-candidate authentication failures for one pairing an implementation SHOULD
-suggest re-pairing, while leaving stored keys untouched per invariant
-`INV-18`.
+reason on an authenticated channel destroys its own pair keys, records that the
+peer initiated the end, closes the session, and shows why; the pairing is dead
+on both sides and both users see why.
 
-`revoked` is entered deliberately: by local user action, or by the
-authenticated peer notice above. Local revocation with no channel simply
-destroys keys; the peer discovers the loss as described.
+A pairing is ended deliberately by a local user action (forget) or by the
+authenticated peer notice above. There is no offline-peer case: a pairing
+exists only while its connection is live, so a peer that has lost the
+connection has already destroyed its keys under the liveness deadline of
+Section 11. Recovery is always a fresh QR pairing ceremony.
 
 ### 14.7 Global event precedence
 
@@ -1272,7 +1261,17 @@ error-body = {
 }
 ```
 
-Registered `error` names in RAPP 0.1: `busy`, `unknown_operation`.
+Registered `error` names in this version of RAPP: `reserved`,
+`unknown_operation`. `reserved` answers an authenticated `operation.request`
+that arrives while the single operation slot (`MAX_ACTIVE_OPERATIONS`) is
+occupied; the request is refused without any state change. There is no
+connection-level refusal message: an additional connection attempt during a
+live pairing is refused before authentication (Section 10).
+
+Because a pairing is its live connection, every condition that closes the
+session also ends the pairing and destroys the in-memory pair keys. The
+pairing-effect column records only whether an explicit end-of-pairing notice
+is carried to the peer.
 
 | Condition | Wire carrier | Session effect | Pairing effect | Credential attempts |
 | --- | --- | --- | --- | --- |
@@ -1281,18 +1280,19 @@ Registered `error` names in RAPP 0.1: `busy`, `unknown_operation`.
 | `cancelled` | result status `cancelled` | remains healthy | none | none |
 | `request_invalid_or_unsupported` | result status `rejected` | remains healthy | none | none |
 | `unknown_operation` | `error` | remains healthy | none | none |
-| `busy` | `error`, then close | new candidate session closes | none | none |
-| `retry_policy_refused` | result status `rejected` | closes explicitly | none | none |
-| `credential_rejected` | result status `credential_rejected` | closes immediately | revoked immediately on both peers | at most one consumed |
+| `reserved` | `error` | remains healthy | none | none |
+| `retry_policy_refused` | result status `rejected` | closes explicitly | ends with the session, no notice | none |
+| `credential_rejected` | result status `credential_rejected` | closes immediately | ends on both peers; the bounded result is the notice | at most one consumed |
 | `card_removed_before_transmit` | result status `cancelled` | may remain healthy | none | none |
-| `card_completion_ambiguous` | result status `ambiguous`, best effort | closes immediately | none | never repeated |
-| `transport_failed` | none; observed locally | closing, then closed | none | by commit boundary |
-| `session_integrity_failed` | none; channel unusable | closes immediately | none | by commit boundary |
-| `authenticated_protocol_violation` | `session.close` reason `protocol_violation`, best effort | closes | revoked immediately; peer marks revoked | never repeated |
-| `pairing_revoked` | `session.close` reason `pairing_revoked`, best effort | closes | revoked; peer marks revoked | never repeated |
-| `local_security_shutdown` | none | closes | none | ambiguous if committed |
+| `card_completion_ambiguous` | result status `ambiguous`, best effort | closes immediately | ends with the session, no notice | never repeated |
+| `transport_failed` | none; observed locally | closing, then closed | ends with the session; no notice possible | by commit boundary |
+| `session_integrity_failed` | none; channel unusable | closes immediately | ends with the session; no notice possible | by commit boundary |
+| `authenticated_protocol_violation` | `session.close` reason `protocol_violation`, best effort | closes | ends with notice; peer ends too | never repeated |
+| `pairing_revoked` | `session.close` reason `pairing_revoked`, best effort | closes | ends with notice; peer ends too | never repeated |
+| `local_security_shutdown` | none | closes | ends with the session, no notice | ambiguous if committed |
 
-An ordinary user denial is not an anomaly. It MUST NOT revoke a pairing.
+An ordinary user denial is not an anomaly. It MUST NOT close the session or
+end the pairing.
 
 ## 16. Transport profiles
 
@@ -1303,8 +1303,8 @@ A transport profile MUST provide:
 - peer-reachable candidate parameters;
 - a candidate identifier available to both endpoints of an established
   connection, for the parameter echo of Section 8.4;
-- pair-specific rendezvous, so an accepting endpoint can associate an
-  incoming connection with a stored pairing;
+- where the profile accepts inbound connections, an unambiguous way to
+  associate an incoming connection with the active pairing offer;
 - a clear distinction between transport establishment and RAPP health;
 - no hidden reconnection or message replay; and
 - enough metadata to satisfy the prologue of Section 8.3.
@@ -1323,10 +1323,11 @@ A future ICE-based direct profile using
 not reserved by name.
 
 QUIC, TLS, WebSocket, Bluetooth, and Apple frameworks are underlays. Their
-security never replaces the RAPP Noise session. A profile may attempt multiple
+security never replaces the RAPP Noise channel. A profile may attempt multiple
 candidates before authentication only according to an explicit user-visible
-connection action. Once Noise authentication begins, fallback requires a new
-session; during or after a committed operation it is forbidden.
+connection action. Once Noise authentication begins there is no candidate
+fallback: the connection either becomes the pairing's one live channel or is
+discarded, and a failed attempt does not consume the offer (Section 9.3).
 
 ### 16.1 The stream profile
 
@@ -1339,12 +1340,11 @@ platform without Apple-native connectivity can participate.
 
 **Connection direction.** The requester runs the listener; the proxy dials.
 This matches device reality: a desktop requester has a stable address and
-lifetime, while a phone proxy does not. The proxy dials both for pairing
-(Section 9.3, where the offer carries the listener's parameters) and for
-session establishment (Section 10, after an explicit action on the proxy
-whose holder is about to present the card anyway). Logical Noise roles are
-unchanged: the requester initiates every handshake over the accepted
-connection.
+lifetime, while a phone proxy does not. The proxy dials exactly once, at
+pairing (Section 9.3, where the offer carries the listener's parameters);
+that single accepted connection then lives as the session for the pairing's
+whole life (Section 10). Logical Noise roles are unchanged: the requester
+initiates the handshake over the accepted connection.
 
 **Framing.** Every frame is a 2-byte big-endian length prefix followed by
 exactly that many payload bytes. A declared length of zero is malformed. The
@@ -1362,68 +1362,68 @@ stream-parameters = {
 ```
 
 `candidate_id` is chosen by the requester and distinguishes multiple stream
-candidates within one offer. The proxy stores the selected candidate,
-including its endpoint list, at pairing confirmation and dials those
-endpoints for later sessions.
+candidates within one offer. The candidate the proxy selected is echoed and
+compared in `pairing.hello` (Section 8.4); nothing about it is stored beyond
+the life of the connection.
 
-**Rendezvous preamble.** Immediately after connecting, before any Noise
+**Connection preamble.** Immediately after connecting, before any Noise
 message, the proxy sends exactly one plaintext preamble frame containing the
 deterministic-CBOR encoding of:
 
 ```cddl
-stream-rendezvous = [
+stream-preamble = [
   "RAPP-stream-v1",
-  tstr,                     ; purpose: "pairing" / "session"
-  bstr                      ; purpose "pairing": empty
-                            ; purpose "session": rendezvous_token, Section 8.5
+  "pairing"
 ]
 ```
 
 On accepting a connection, the requester reads exactly one bounded preamble
-frame. Purpose `pairing` is honored only while the listener has an active
-offer (Section 9.3); the requester then sends the first pairing handshake
-message. Purpose `session` is honored only when `rendezvous_token` equals the
-stored token of exactly one non-revoked pairing; the requester then initiates
-the session handshake with that pairing's keys. Any other preamble — unknown
-purpose, unknown token, malformed CBOR, oversized frame, or a second preamble
-— is pre-authentication invalid input (Section 14.5, class 1): the connection
-closes and no stored state changes.
+frame. The preamble is honored only while the listener has an active offer
+(Section 9.3); the requester then sends the first pairing handshake message.
+Anything else — an unknown value, malformed CBOR, an oversized frame, a
+second preamble, or any preamble while no offer is active (including during a
+live pairing, Section 10) — is pre-authentication invalid input
+(Section 14.5, class 1): the connection closes and nothing changes.
 
-The preamble is unauthenticated routing metadata, exactly like a relay token
-(Section 17). Possession of a token lets an attacker elicit the first
-`Noise_KK` handshake message, which contains a fresh ephemeral public key and
-no identity, and lets a network observer link the connection to an
-unidentified recurring pairing; it enables nothing else. The requester
-processes one inbound connection's handshake at a time and MAY rate-limit
-connection attempts.
+The preamble is unauthenticated routing metadata. Honoring it lets an
+unauthenticated dialer elicit the first pairing handshake message, which
+contains a fresh ephemeral public key and no identity; without the offer's
+bearer secret the handshake cannot complete, and a failed attempt does not
+consume the offer (Section 9.3). The requester processes one inbound
+connection's handshake at a time and MAY rate-limit connection attempts.
 
 **Strictness.** The profile inherits the protocol's single-connection
-discipline unchanged: one live session per pairing (`busy` otherwise), no
-hidden reconnection, no candidate fallback after authentication begins, and
-every anomaly fails the connection closed. A requester whose listener address
-has changed since pairing is unreachable until the user pairs anew or a
-reviewed extension defines candidate refresh; the profile deliberately
-prefers breakage to silent endpoint changes.
+discipline unchanged: the pairing's whole life is one connection, with no
+hidden reconnection and no candidate fallback once authentication begins, and
+every anomaly fails the connection closed — which ends the pairing with it
+(Section 14.2). A listener address is meaningful only while an offer is
+displayed; a requester whose address changes simply pairs anew. The profile
+deliberately prefers breakage to silent endpoint changes.
 
 ## 17. Rendezvous relay
 
-The relay routes by a high-entropy, pair-specific opaque rendezvous token. The
-token is not a RAPP identity or key. Relay authentication MAY control abuse and
-billing but MUST NOT be accepted as requester or proxy authentication.
+A relay profile routes by a high-entropy opaque rendezvous token that the
+profile itself defines; the token is not a RAPP identity or key and is not
+one of the derived identifiers of Section 8.5. Relay authentication MAY
+control abuse and billing but MUST NOT be accepted as requester or proxy
+authentication.
 
 The relay MUST:
 
 - handle only encrypted frames and bounded routing metadata;
 - prevent one peer from enumerating other peers;
 - apply size, rate, lifetime, and connection limits before buffering;
-- avoid durable store-and-forward in RAPP 0.1;
+- avoid durable store-and-forward in this version of RAPP;
 - ensure push notifications contain only an opaque wake hint;
 - delete queued ciphertext when a session closes or expires; and
 - document retained metadata and deletion periods.
 
-A relay that corrupts, drops, duplicates, or reorders frames causes session
-integrity failures and reconnection effort, never pairing loss
-(Section 14.5). End-to-end encryption does not hide timing, endpoints,
+A relay that corrupts, drops, duplicates, or reorders frames causes a
+session-integrity failure, which closes the session and — because a pairing
+is its live connection — ends the pairing; recovery is a fresh ceremony. A
+relay can therefore end a pairing by withholding service, which is the
+accepted cost of the dead-man's switch; it can never forge, hijack, or
+resurrect one. End-to-end encryption does not hide timing, endpoints,
 connection duration, or approximate message size from the relay. Padding and
 traffic-shaping are future extensions and must be evaluated against mobile
 power use.
@@ -1472,19 +1472,19 @@ unless a separately approved physical-card procedure requires otherwise.
 
 ## 20. Privacy model
 
-RAPP uses pair-specific keys, pair identifiers, and relay tokens. It has no
-global user or device identifier. Pair records are device-only and not included
-in cloud backups. The relay cannot discover card identity from protocol
-plaintext because it receives none.
+RAPP uses pair-specific keys and pair identifiers. It has no global user or
+device identifier. Pair keys live only in memory for the life of the
+connection and are never written at rest, so they cannot appear in cloud
+backups. A relay cannot discover card identity from protocol plaintext
+because it receives none.
 
-`pair_id` and `session_id` are derived from handshake hashes whose inputs
-include offer content that never crosses the network, so a network observer
-cannot compute them; neither identifier appears in plaintext on the wire.
-Where a transport profile requires plaintext rendezvous, it carries the
-separately derived `rendezvous_token` (Section 8.5), never `pair_id`. An
-observer of one network path can recognize that token's recurrence, which is
-inherent to rendezvous, but cannot connect it to `pair_id`, to the other
-identifiers, or to tokens observed for other pairings.
+`pair_id` and `session_id` are derived from the pairing handshake hash, whose
+inputs include offer content that never crosses the network, so a network
+observer cannot compute them; neither identifier appears in plaintext on the
+wire. The stream profile's connection preamble (Section 16.1) carries no
+pairing identifier at all. A future relay profile that needs plaintext
+rendezvous MUST carry its own opaque token (Section 17), never `pair_id` or
+any Section 8.5 identifier.
 
 The requester receives only profile-required results. An authentication or
 signing profile may necessarily return a certificate chain, public key,
@@ -1509,8 +1509,8 @@ machine-readable model:
 | `INV-04` | A proxy has at most one active credential operation. |
 | `INV-05` | One operation identifier causes at most one credential-command transmission. |
 | `INV-06` | Ambiguous completion is never retried automatically. |
-| `INV-07` | Revoked keys are never automatically restored. |
-| `INV-08` | Version, suite, grants, and transport are transcript-bound. |
+| `INV-07` | Destroyed pair keys are never automatically restored. |
+| `INV-08` | Version, suite, offer content, and transport profile are transcript-bound. |
 | `INV-09` | A relay never receives RAPP plaintext or credential material. |
 | `INV-10` | A requester never receives CAN, PIN, activation, or PUK values. |
 | `INV-11` | Connected requires recent authenticated liveness proof. |
@@ -1520,7 +1520,7 @@ machine-readable model:
 | `INV-15` | Local policy may be stricter than negotiated policy, never weaker. |
 | `INV-16` | Invalid CAN, PIN 1, or PIN 2 closes the RAPP session. |
 | `INV-17` | Credential rejection never automatically reconnects or repeats. |
-| `INV-18` | Unauthenticated or unattributable input never revokes a stored pairing. |
+| `INV-18` | Pre-authentication input never destroys pair keys or ends a pairing; unattributable input is never blamed on the peer. |
 
 ## 22. Conformance and verification
 
@@ -1568,9 +1568,9 @@ Conformance evidence includes:
 - production-artifact inspection proving unsafe diagnostics are absent.
 
 The machine-readable corpus at
-`vectors/rapp-v26.8.17.135.json` fixes the deterministic CBOR,
+`vectors/rapp-v26.8.17.213.json` fixes the deterministic CBOR,
 envelope-rejection, sequence, downgrade, grant, hash, and mandatory Noise
-XXpsk3/KK known-answer vectors for this document version. Fields prefixed
+XXpsk3 known-answer vectors for this document version. Fields prefixed
 `test_only_` are public deterministic test material and MUST NOT be used as
 runtime keys or pairing secrets.
 
@@ -1603,7 +1603,7 @@ or an extension that changes state without negotiation is a protocol violation.
 
 Review is specifically requested on:
 
-1. whether Noise revision 34 and the proposed `XXpsk3`/`KK` patterns are the
+1. whether Noise revision 34 and the proposed `XXpsk3` pattern are the
    right stable basis, or whether a standardized alternative is preferable;
 2. whether the QR possession assumption and two-sided confirmation adequately
    address QR observation and pairing races;
@@ -1659,7 +1659,8 @@ Review is specifically requested on:
 
 An external reviewer should be able to answer:
 
-- What exact fact authenticates each peer during pairing and later sessions?
+- What exact fact authenticates each peer during pairing and the session
+  that continues from it?
 - Which fields are bound to the cryptographic transcript, and can both peers
   possess every bound value before the handshake?
 - Does any handshake message carry a payload readable before the pre-shared
@@ -1721,20 +1722,47 @@ destruction. This revision:
   challenge verification, bounded offer lifetime and size, and defined the
   storage protection of retained results.
 
-## Appendix C. Changes from 26.8.16.85
+## Appendix C. Change history
+
+### Changes in 26.8.17.213, from 26.8.17.135
+
+This revision redefines the pairing lifecycle and collapses the protocol to
+one handshake and one connection:
+
+- made pairing ephemeral and liveness-bound: a pairing lives only in memory
+  for the life of its authenticated, liveness-maintained connection, and any
+  loss of that connection — clean close, liveness deadline, credential
+  rejection, or protocol violation — destroys the in-memory pair keys on both
+  peers, removing the `paired_disconnected` and `revoked` resting states,
+  durable pair records, and the credential-rejection tombstone; a dropped
+  pairing is never re-established automatically, and recovery is always a
+  fresh QR ceremony;
+- collapsed the protocol to a single channel: the `Noise_XXpsk3` pairing
+  handshake's authenticated channel continues as the live session, removing
+  the `Noise_KK` session construction, the session prologue, `session.ready`,
+  `grants_hash`, and the derived `rendezvous_token`; the stream preamble
+  becomes single-purpose, an additional connection attempt during a live
+  pairing is refused before authentication, and connection direction remains
+  a transport-profile property with the requester as handshake initiator;
+- renamed the operation-slot refusal from `busy` to `reserved`: it answers
+  only an authenticated `operation.request` that finds the single operation
+  slot occupied, refused without any state change;
+- set the wire version to the calendar tuple `[26, 8]`, a deliberate wire
+  break that invalidates every earlier handshake prologue and envelope; and
+- regenerated the conformance corpus for the single-handshake wire under
+  this document version.
+
+### Changes in 26.8.17.135, from 26.8.16.85
 
 Draft 26.8.16.85 continued to evolve after its version was stamped, so the
-label briefly named more than one document. This revision collects that
-drift under a fresh version and adds the first cross-platform transport
+label briefly named more than one document. That revision collected the
+drift under a fresh version and added the first cross-platform transport
 profile. Relative to the originally stamped 26.8.16.85 text:
 
 - replaced per-pairing violation strikes and the quarantine state with
   immediate revocation: the first authenticated protocol violation revokes
   the pairing on both peers, removing `VIOLATION_STRIKE_LIMIT`, the
   `quarantined` state, and the `pairing_quarantined` close reason;
-- extended credential rejection to durably revoke the pairing on both peers
-  with a written tombstone, replacing the earlier user-intent admission
-  record;
 - defined the closed action registry: `inspect_card`, `read_identity`,
   `read_certificate`, `browser_authenticate`, and `sign_document`, with
   certificate reads owned by the profile whose key the certificate serves;
@@ -1744,13 +1772,7 @@ profile. Relative to the originally stamped 26.8.16.85 text:
 - registered `fi.refineid.stream.v1` (Section 16.1): a length-prefixed
   stream profile in which the requester listens and the proxy dials, for
   requester platforms without Apple-native connectivity;
-- generalized session establishment so that underlying connection direction
-  is a transport-profile property while the requester remains the handshake
-  initiator on every profile, and required a transport whose accepting
-  endpoint is the requester to indicate the pairing before the handshake;
-- added the derived `rendezvous_token` (Section 8.5), giving transports a
-  plaintext-safe pair-specific rendezvous value distinct from `pair_id`;
 - referenced the machine-readable conformance corpus from the conformance
-  section and carried its vectors forward under this document version; and
+  section; and
 - corrected the abstract, which still described repeated-violation pairing
   destruction, to the single-violation rule.

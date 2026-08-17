@@ -77,6 +77,9 @@ internal static partial class NativeRappService
     [LibraryImport(Library, EntryPoint = "refineid_rapp_read_card")]
     private static partial nint ReadCardNative(ulong handle);
 
+    [LibraryImport(Library, EntryPoint = "refineid_rapp_check_pairing")]
+    private static partial nint CheckPairingNative(ulong handle);
+
     [LibraryImport(Library, EntryPoint = "refineid_rapp_string_free")]
     private static partial void StringFree(nint value);
 
@@ -133,9 +136,20 @@ internal static partial class NativeRappService
     /// <summary>Releases the handle and its background resources.</summary>
     internal static void EndPairing(ulong handle) => EndPairingNative(handle);
 
-    /// <summary>Connects to the paired card and reads its public status, identity, and certificate.</summary>
+    /// <summary>Reads the holder identity over the live pairing channel.</summary>
     internal static CardReading ReadCard(ulong handle) =>
         Invoke(() => ReadCardNative(handle), RappJsonContext.Default.NativeEnvelopeCardReading);
+
+    /// <summary>
+    /// Checks the live pairing still answers. Throws with code
+    /// <c>pairing_ended</c> when the phone closed or stopped answering; the
+    /// pairing is then already over and the handle should be ended.
+    /// </summary>
+    internal static void CheckPairing(ulong handle) =>
+        _ = Invoke(
+            () => CheckPairingNative(handle),
+            RappJsonContext.Default.NativeEnvelopeAcknowledgement
+        );
 
     private static T Invoke<T>(Func<nint> operation, JsonTypeInfo<NativeEnvelope<T>> envelopeInfo)
     {

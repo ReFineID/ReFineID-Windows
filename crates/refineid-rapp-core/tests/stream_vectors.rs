@@ -5,23 +5,19 @@
     reason = "test fixtures are constructed to be infallible"
 )]
 
-use refineid_rapp_core::ids::RendezvousToken;
-use refineid_rapp_core::stream::{StreamError, StreamRendezvous};
+use refineid_rapp_core::stream::{StreamError, StreamPreamble};
 use serde::Deserialize;
 
-const CORPUS: &str = include_str!("../../../docs/protocol/vectors/rapp-v26.8.17.135.json");
+const CORPUS: &str = include_str!("../../../docs/protocol/vectors/rapp-v26.8.17.213.json");
 
 #[derive(Debug, Deserialize)]
 struct Corpus {
-    stream_rendezvous: Vec<StreamVector>,
+    stream_preamble: Vec<StreamVector>,
 }
 
 #[derive(Debug, Deserialize)]
 struct StreamVector {
     name: String,
-    purpose: String,
-    #[serde(default)]
-    rendezvous_token_hex: Option<String>,
     encoded_hex: String,
     accepted: bool,
     #[serde(default)]
@@ -31,27 +27,13 @@ struct StreamVector {
 #[test]
 fn stream_preambles_match_golden_bytes_and_rejections() {
     let corpus: Corpus = serde_json::from_str(CORPUS).expect("corpus must parse");
-    assert_eq!(corpus.stream_rendezvous.len(), 5);
-    for vector in corpus.stream_rendezvous {
+    assert_eq!(corpus.stream_preamble.len(), 5);
+    for vector in corpus.stream_preamble {
         let encoded = decode_hex(&vector.encoded_hex);
-        let outcome = StreamRendezvous::decode(&encoded);
+        let outcome = StreamPreamble::decode(&encoded);
         if vector.accepted {
             let decoded = outcome.expect("accepted preamble must decode");
-            let expected = match vector.purpose.as_str() {
-                "pairing" => StreamRendezvous::Pairing,
-                "session" => {
-                    let token_bytes = decode_hex(
-                        vector
-                            .rendezvous_token_hex
-                            .as_deref()
-                            .expect("session token"),
-                    );
-                    let token: [u8; 16] = token_bytes.as_slice().try_into().expect("token length");
-                    StreamRendezvous::Session(RendezvousToken(token))
-                }
-                other => panic!("unregistered accepted purpose {other}"),
-            };
-            assert_eq!(decoded, expected, "{} decoded preamble", vector.name);
+            assert_eq!(decoded, StreamPreamble, "{} decoded preamble", vector.name);
             assert_eq!(
                 decoded.encode().expect("preamble must re-encode"),
                 encoded,

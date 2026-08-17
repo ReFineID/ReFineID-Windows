@@ -43,8 +43,10 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
-use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{OfferId, PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::engine::{
+    OperationOutcome, PeerIntroduction, Requester, RequesterConfig, Session,
+};
+use refineid_rapp_core::ids::{OfferId, PairingSecret};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
@@ -52,9 +54,9 @@ use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
-use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
-use refineid_rapp_core::transport::STREAM_PROFILE;
+use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore};
+use refineid_rapp_core::stream::{StreamListener, stream_candidate_parameters};
+use refineid_rapp_core::transport::{STREAM_PROFILE, TcpFrameTransport};
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 use serde::Serialize;
 
@@ -66,10 +68,6 @@ const RECEIVE_DEADLINE_MS: u64 = 180_000;
 
 /// Operation expiry sent on the wire; the holder approves within this.
 const OPERATION_EXPIRY_MS: u64 = 120_000;
-
-/// Maximum inbound connections a single read will sift for the paired
-/// session before giving up, so a stray dial cannot loop forever.
-const MAX_SESSION_ATTEMPTS: u32 = 16;
 
 /// Longest listen address or advertised endpoint accepted, in bytes.
 const MAX_ADDRESS_BYTES: usize = 1_024;
@@ -163,16 +161,15 @@ enum Phase {
     },
     Denied,
     Cancelled,
-    Failed(String),
 }
 
-/// The live requester and its listener, parked here once pairing succeeds so
-/// a later read can drive the card on the caller's thread.
+/// The live requester and the session its pairing channel became, parked
+/// here once pairing succeeds so a later read can drive the card on the
+/// caller's thread. The listener is dropped at pairing: the one connection
+/// is the pairing, and nothing exists for another connection to reach.
 struct Paired {
     requester: StreamRequester,
-    listener: StreamListener,
-    pair_id: PairId,
-    rendezvous: RendezvousToken,
+    session: Session<TcpFrameTransport>,
 }
 
 /// State a pairing handle shares across threads.
@@ -321,9 +318,11 @@ pub extern "C" fn refineid_rapp_cancel_pairing(handle: u64) -> *mut c_char {
     })
 }
 
-/// Read the paired card: card status, identity, and the authentication
-/// certificate length. Blocks until the phone dials a session for this
-/// pairing, then runs the safe reads and closes the session.
+/// Read the paired card's identity over the live pairing channel.
+///
+/// The pairing connection is already the session, so the read runs
+/// immediately and blocks only for the phone's card read; the session stays
+/// live until [`refineid_rapp_end_pairing`].
 ///
 /// The returned identity fields are shown to the user; no card data is
 /// logged. Signing is not yet exposed: `browser_authenticate` and
@@ -338,6 +337,34 @@ pub extern "C" fn refineid_rapp_read_card(handle: u64) -> *mut c_char {
         let result = read_paired_card(&mut paired);
         restore_paired(handle, paired);
         result
+    })
+}
+
+/// Check that the live pairing still answers.
+///
+/// Sends one liveness ping and waits for the echo, answering the phone's own
+/// pings while waiting. On success the pairing stays live. On any failure —
+/// the phone closed, vanished, or violated the protocol — the pairing is
+/// already over and its keys destroyed; the caller should end the handle and
+/// clear the identity it showed.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_rapp_check_pairing(handle: u64) -> *mut c_char {
+    reply_json(|| {
+        let mut paired = take_paired(handle)?;
+        match paired.requester.check_liveness(&mut paired.session) {
+            Ok(()) => {
+                restore_paired(handle, paired);
+                Ok(AckDto { ok: true })
+            }
+            Err(_error) => {
+                // The engine has ended the pairing; dropping `paired` destroys
+                // the in-memory keys and the socket.
+                Err(ApiFailure::new(
+                    "pairing_ended",
+                    "The pairing ended; the phone closed or stopped answering.",
+                ))
+            }
+        }
     })
 }
 
@@ -368,7 +395,11 @@ fn restore_paired(handle: u64, paired: Paired) {
     }
 }
 
-/// End a pairing: stop its background thread and release the handle.
+/// End the pairing: close its live session, stop the thread, free the handle.
+///
+/// The pairing lives only in memory, so this destroys the pair keys after a
+/// best-effort clean close notice; the phone drops its side when it sees the
+/// close or the connection end.
 #[unsafe(no_mangle)]
 pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
     reply_json(|| {
@@ -381,11 +412,16 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
         };
         // Wake the background thread if it is still blocked on accept, then
         // let its own drop release the listener and requester.
-        if let Ok(mut shared) = entry.shared.lock() {
+        let paired = entry.shared.lock().map_or(None, |mut shared| {
             shared.end_requested = true;
             if let Some(decision_tx) = shared.decision_tx.take() {
                 let _ = decision_tx.send(None);
             }
+            shared.paired.take()
+        });
+        if let Some(mut paired) = paired {
+            let Paired { requester, session } = &mut paired;
+            requester.disconnect(session, CloseReason::UserDisconnect);
         }
         let _ = TcpStream::connect(("127.0.0.1", entry.port));
         if let Some(thread) = entry.thread.take() {
@@ -509,16 +545,12 @@ fn pairing_thread(
         if ended(handle_id) {
             return;
         }
-        let Ok(accepted) = listener.accept() else {
+        let Ok(transport) = listener.accept() else {
             continue;
         };
         if ended(handle_id) {
             return;
         }
-        let StreamAccept::Pairing(transport) = accepted else {
-            // A session dial before any pairing exists: ignore it.
-            continue;
-        };
 
         let (decision_tx, decision_rx) = channel::<Option<Vec<String>>>();
         if !publish_decision_sender(handle_id, decision_tx) {
@@ -544,8 +576,11 @@ fn pairing_thread(
             confirm,
         );
         match outcome {
-            Ok(pair_id) => {
-                finish_pairing(handle_id, requester, listener, pair_id);
+            Ok(session) => {
+                // The one connection is the pairing: the listener closes so
+                // any further connection is refused by construction.
+                drop(listener);
+                finish_pairing(handle_id, requester, session);
                 return;
             }
             Err(error) => {
@@ -557,64 +592,24 @@ fn pairing_thread(
     }
 }
 
-fn finish_pairing(
-    handle_id: u64,
-    requester: StreamRequester,
-    listener: StreamListener,
-    pair_id: PairId,
-) {
-    let Ok(record) = requester.store().get(pair_id) else {
-        set_phase(
-            handle_id,
-            Phase::Failed("The stored pairing could not be read.".to_owned()),
-        );
-        return;
-    };
-    let rendezvous = record.rendezvous_token;
-    let pair_id_hex = hex::encode(pair_id.0);
+fn finish_pairing(handle_id: u64, requester: StreamRequester, session: Session<TcpFrameTransport>) {
+    let pair_id_hex = hex::encode(session.pair_id().0);
     // If the handle is gone, the closure is never run and the moved
-    // requester and listener are dropped here instead.
+    // requester and session are dropped here instead, which ends the
+    // pairing.
     let _stored = registry_entry_apply(handle_id, move |shared| {
         shared.decision_tx = None;
         shared.phase = Phase::Paired { pair_id_hex };
-        shared.paired = Some(Paired {
-            requester,
-            listener,
-            pair_id,
-            rendezvous,
-        });
+        shared.paired = Some(Paired { requester, session });
     });
 }
 
 fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
-    let mut attempts = 0_u32;
-    let session_transport = loop {
-        if attempts >= MAX_SESSION_ATTEMPTS {
-            return Err(ApiFailure::new(
-                "no_session",
-                "The phone did not open a session for this pairing.",
-            ));
-        }
-        attempts += 1;
-        if let Ok(StreamAccept::Session {
-            rendezvous_token,
-            transport,
-        }) = paired.listener.accept()
-            && rendezvous_token == paired.rendezvous
-        {
-            break transport;
-        }
-    };
-
-    let mut session = paired
-        .requester
-        .connect(paired.pair_id, session_transport)
-        .map_err(|error| ApiFailure::new("session_failed", format!("{error:?}")))?;
-
-    // The requester screen shows only the holder identity, so the read is one
-    // operation and the phone reads the card once. Card status and the
-    // certificate bytes are separate operations added when a screen needs them.
-    let identity = match run_operation(paired, &mut session, &CardOperation::ReadIdentity)? {
+    // The pairing channel is already the live session: the read runs on it
+    // immediately, and the session stays live afterwards until the caller
+    // ends the pairing. The requester screen shows only the holder identity,
+    // so the read is one operation and the phone reads the card once.
+    let identity = match run_operation(paired, &CardOperation::ReadIdentity)? {
         CardOperationResult::Identity {
             display_name,
             person_id,
@@ -625,22 +620,15 @@ fn read_paired_card(paired: &mut Paired) -> Result<CardReadDto, ApiFailure> {
         _ => return Err(unexpected_result("read_identity")),
     };
 
-    paired
-        .requester
-        .disconnect(&mut session, CloseReason::UserDisconnect);
-
     Ok(CardReadDto { identity })
 }
 
 fn run_operation(
     paired: &mut Paired,
-    session: &mut refineid_rapp_core::engine::Session<
-        refineid_rapp_core::transport::TcpFrameTransport,
-    >,
     operation: &CardOperation,
 ) -> Result<CardOperationResult, ApiFailure> {
-    let outcome = paired
-        .requester
+    let Paired { requester, session } = paired;
+    let outcome = requester
         .execute(session, operation, OPERATION_EXPIRY_MS)
         .map_err(|error| ApiFailure::new("operation_not_admitted", format!("{error:?}")))?;
     match outcome {
@@ -715,12 +703,6 @@ fn state_dto(phase: &Phase) -> PairingStateDto {
             pair_id_hex: None,
             message: None,
         },
-        Phase::Failed(message) => PairingStateDto {
-            state: "failed",
-            peer: None,
-            pair_id_hex: None,
-            message: Some(message.clone()),
-        },
     }
 }
 
@@ -760,12 +742,6 @@ fn set_awaiting(handle_id: u64, peer: &PeerIntroduction, offered: &[String]) {
             platform: peer.platform.clone(),
             profiles: offered.to_vec(),
         };
-    });
-}
-
-fn set_phase(handle_id: u64, phase: Phase) {
-    registry_entry_apply(handle_id, |shared| {
-        shared.phase = phase;
     });
 }
 

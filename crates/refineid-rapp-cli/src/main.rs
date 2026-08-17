@@ -2,9 +2,10 @@
 //!
 //! `refineid-rapp pair-demo` proves the full stream-profile path against a
 //! real phone proxy in one process: it displays the pairing QR, accepts the
-//! phone's connection, confirms grants on both devices, then serves inbound
-//! sessions and runs typed card operations that the holder approves on the
-//! phone. The pair keys live only for the process; a pairing is never stored.
+//! phone's connection, confirms grants on both devices, then runs typed card
+//! operations over that same connection — the pairing channel is the
+//! session. The pair keys live only in memory; when the session closes, the
+//! pairing ends with it, and recovery is a fresh QR ceremony.
 //!
 //! This is a development tool. It prints operation results to the terminal
 //! and must not be distributed to end users.
@@ -13,7 +14,7 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use refineid_rapp_core::engine::{OperationOutcome, PeerIntroduction, Requester, RequesterConfig};
-use refineid_rapp_core::ids::{Challenge, OfferId, PairId, PairingSecret, RendezvousToken};
+use refineid_rapp_core::ids::{Challenge, OfferId, PairingSecret};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
@@ -24,7 +25,7 @@ use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
 use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore, PairingStore};
-use refineid_rapp_core::stream::{StreamAccept, StreamListener, stream_candidate_parameters};
+use refineid_rapp_core::stream::{StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::STREAM_PROFILE;
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
 
@@ -159,20 +160,16 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
     flush_now();
 
     let deadline = Instant::now() + Duration::from_millis(OFFER_TTL_MAX_MS);
-    let pair_id = loop {
+    let mut session = loop {
         if Instant::now() >= deadline {
             return Err("the pairing offer expired".into());
         }
-        let accepted = match listener.accept() {
-            Ok(accepted) => accepted,
+        let transport = match listener.accept() {
+            Ok(transport) => transport,
             Err(error) => {
                 println!("discarded connection: {error:?}");
                 continue;
             }
-        };
-        let StreamAccept::Pairing(transport) = accepted else {
-            println!("discarded a session attempt before any pairing exists");
-            continue;
         };
         match requester.pair(
             &offer,
@@ -181,116 +178,71 @@ fn pair_demo(arguments: &[String]) -> Result<(), String> {
             transport,
             confirm_grants,
         ) {
-            Ok(pair_id) => break pair_id,
+            Ok(session) => break session,
             Err(error) => {
                 println!("pairing attempt failed: {error:?}; the offer stays live");
             }
         }
     };
     drop(PairingSecret(secret_bytes));
+    // The one connection is the pairing; nothing exists for another
+    // connection to reach.
+    drop(listener);
 
-    let expected_token = {
+    let pair_id = session.pair_id();
+    {
         let record = requester
             .store()
             .get(pair_id)
-            .map_err(|error| format!("stored pairing unreadable: {error:?}"))?;
+            .map_err(|error| format!("live pairing unreadable: {error:?}"))?;
         println!(
             "paired with {} ({}); granted: {}",
             record.peer_display_name,
             record.peer_platform,
             record.granted_profiles.join(", ")
         );
-        record.rendezvous_token
-    };
-    flush_now();
-
-    serve_sessions(
-        &mut requester,
-        &listener,
-        pair_id,
-        expected_token,
-        options.sign_profile,
-    )
-}
-
-/// Serves inbound sessions for one pairing until interrupted: for each session
-/// the phone dials, it connects, runs the read operations and an optional
-/// signature, and disconnects. Shared by `pair-demo` and `reconnect`.
-fn serve_sessions<S: PairingStore>(
-    requester: &mut Requester<S, MemoryJournal>,
-    listener: &StreamListener,
-    pair_id: PairId,
-    expected_token: RendezvousToken,
-    sign_profile: Option<(KeyProfile, SignatureAlgorithm)>,
-) -> Result<(), String> {
-    println!("waiting for the phone to connect; open ReFineID and choose this computer");
-    flush_now();
-    loop {
-        let accepted = match listener.accept() {
-            Ok(accepted) => accepted,
-            Err(error) => {
-                println!("discarded connection: {error:?}");
-                continue;
-            }
-        };
-        let StreamAccept::Session {
-            rendezvous_token,
-            transport,
-        } = accepted
-        else {
-            println!("discarded a pairing attempt; no offer is active");
-            continue;
-        };
-        if rendezvous_token != expected_token {
-            println!("discarded a session for an unknown rendezvous token");
-            continue;
-        }
-        let mut session = match requester.connect(pair_id, transport) {
-            Ok(session) => session,
-            Err(error) => {
-                println!("session establishment failed: {error:?}");
-                continue;
-            }
-        };
-        println!("session healthy; running operations (approve each on the phone)");
-        flush_now();
-
-        let mut operations = vec![
-            CardOperation::InspectCard,
-            CardOperation::ReadIdentity,
-            CardOperation::ReadCertificate {
-                kind: CertificateKind::Authentication,
-            },
-        ];
-        if let Some((key_profile, algorithm)) = sign_profile {
-            operations.push(CardOperation::BrowserAuthenticate {
-                origin: "rapp-demo.refineid.fi".into(),
-                key_profile,
-                algorithm,
-                digest: demo_digest(algorithm)?,
-            });
-        }
-        for operation in &operations {
-            print!("{} ... ", operation.action());
-            let _ = std::io::stdout().flush();
-            match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
-                Ok(outcome) => {
-                    report(operation, &outcome);
-                    flush_now();
-                }
-                Err(error) => {
-                    println!("not admitted: {error:?}");
-                    break;
-                }
-            }
-            if requester.store().get(pair_id).is_err() {
-                return Err("the pairing is gone; pair again".into());
-            }
-        }
-        requester.disconnect(&mut session, CloseReason::UserDisconnect);
-        println!("session closed; waiting for the next connection (Ctrl-C to quit)");
-        flush_now();
     }
+    println!("the pairing channel is the session; running operations (the phone reads the card)");
+    flush_now();
+
+    let mut operations = vec![
+        CardOperation::InspectCard,
+        CardOperation::ReadIdentity,
+        CardOperation::ReadCertificate {
+            kind: CertificateKind::Authentication,
+        },
+    ];
+    if let Some((key_profile, algorithm)) = options.sign_profile {
+        operations.push(CardOperation::BrowserAuthenticate {
+            origin: "rapp-demo.refineid.fi".into(),
+            key_profile,
+            algorithm,
+            digest: demo_digest(algorithm)?,
+        });
+    }
+    for operation in &operations {
+        print!("{} ... ", operation.action());
+        let _ = std::io::stdout().flush();
+        match requester.execute(&mut session, operation, OPERATION_EXPIRY_MS) {
+            Ok(outcome) => {
+                report(operation, &outcome);
+                flush_now();
+            }
+            Err(error) => {
+                println!("not admitted: {error:?}");
+                break;
+            }
+        }
+        if requester.store().get(pair_id).is_err() {
+            println!("the session closed and the pairing ended with it; pair again with a new QR");
+            flush_now();
+            return Ok(());
+        }
+    }
+    requester.disconnect(&mut session, CloseReason::UserDisconnect);
+    println!("session closed; the pairing ended with it (a new QR pairs again)");
+    flush_now();
+    Ok(())
 }
 
 /// Pushes buffered output through redirected stdout, which is block

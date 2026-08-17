@@ -1,59 +1,40 @@
-//! Durable pairing records and the operation journal.
+//! In-memory pairing records and the operation journal.
 //!
-//! A pairing record is the atomic store of Section 9.3 step 8: pair keys,
-//! `pair_id`, the rendezvous token, granted profiles, `grants_hash`, labels,
-//! and the fail-stop marker. The journal is the durable operation record of
+//! A pairing exists only while its live, liveness-maintained connection
+//! does (Sections 9.3 and 14.2): the record is held in memory beside the
+//! session and removed when the session closes, which destroys the pair
+//! keys. Nothing pairing-related is written at rest, and there is no
+//! tombstone or reload path. The journal is the operation record of
 //! Sections 12.2 and 12.6: the requester writes its commit intent before
-//! sending commit, and terminal states are permanent.
+//! sending commit, and terminal states are permanent for the record's life.
 //!
-//! Both stores are traits so the Windows build can put pair keys behind the
-//! platform credential store and the journal on disk, while tests use the
-//! in-memory forms shipped here. Neither store ever contains a credential
-//! value, a card identifier, or message plaintext.
+//! Both stores are traits so callers can compose them; neither ever
+//! contains a credential value, a card identifier, or message plaintext.
 
 use zeroize::Zeroizing;
 
-use crate::ids::{OperationId, PairId, RendezvousToken};
+use crate::ids::{OperationId, PairId};
 use crate::states::OperationState;
 
-/// The fail-stop disposition of a stored pairing (Section 14.2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PairingDisposition {
-    /// The pairing is usable.
-    Paired,
-    /// The pairing was terminated — by local action, authenticated peer
-    /// notice, an authenticated protocol violation, or credential rejection.
-    /// Keys are destroyed; the record is the tombstone.
-    Revoked,
-}
-
-/// One stored peer relationship.
+/// One live pairing's key material and labels.
 pub struct PairingRecord {
     /// The derived pair identifier.
     pub pair_id: PairId,
-    /// The derived pair-specific transport rendezvous token (Section 8.5).
-    pub rendezvous_token: RendezvousToken,
-    /// The local pair-specific private key; emptied on revocation.
+    /// The local pair-specific private key. Never read after establishment
+    /// — the single channel needs no further handshake — and held only so
+    /// its zeroizing drop is the key destruction the specification requires
+    /// when the pairing ends.
     pub local_private: Zeroizing<Vec<u8>>,
     /// The local pair-specific public key.
     pub local_public: Vec<u8>,
-    /// The peer's pair-specific public key; emptied on revocation.
+    /// The peer's pair-specific public key.
     pub peer_public: Vec<u8>,
     /// The granted credential profiles.
     pub granted_profiles: Vec<String>,
-    /// The grants hash bound into every session prologue.
-    pub grants_hash: [u8; 32],
     /// The peer's display label. A label, not an identity.
     pub peer_display_name: String,
     /// The peer's platform label.
     pub peer_platform: String,
-    /// The fail-stop disposition.
-    pub disposition: PairingDisposition,
-    /// Whether the peer initiated the revocation.
-    pub peer_initiated_termination: bool,
-    /// Consecutive failed session-candidate authentications, for the
-    /// re-pairing hint of Section 14.6.
-    pub candidate_failures: u32,
 }
 
 impl core::fmt::Debug for PairingRecord {
@@ -61,7 +42,6 @@ impl core::fmt::Debug for PairingRecord {
         formatter
             .debug_struct("PairingRecord")
             .field("pair_id", &self.pair_id)
-            .field("disposition", &self.disposition)
             .finish_non_exhaustive()
     }
 }
@@ -75,9 +55,12 @@ pub enum StoreError {
     WriteRefused,
 }
 
-/// Durable storage for pairing records.
+/// The in-memory holder of live pairing records.
+///
+/// Removal is the key destruction that ends a pairing: implementations MUST
+/// hold records only in memory, never at rest.
 pub trait PairingStore {
-    /// Stores a new record atomically.
+    /// Holds a new record for the life of its connection.
     ///
     /// # Errors
     ///
@@ -91,18 +74,7 @@ pub trait PairingStore {
     /// Fails when no record exists.
     fn get(&self, pair_id: PairId) -> Result<&PairingRecord, StoreError>;
 
-    /// Applies a change to one record.
-    ///
-    /// # Errors
-    ///
-    /// Fails when no record exists or the write is refused.
-    fn update(
-        &mut self,
-        pair_id: PairId,
-        change: &mut dyn FnMut(&mut PairingRecord),
-    ) -> Result<(), StoreError>;
-
-    /// Removes one record entirely (the user's forget action).
+    /// Removes one record entirely, destroying its keys.
     ///
     /// # Errors
     ///
@@ -136,20 +108,6 @@ impl PairingStore for MemoryPairingStore {
             .iter()
             .find(|entry| entry.pair_id == pair_id)
             .ok_or(StoreError::Unknown)
-    }
-
-    fn update(
-        &mut self,
-        pair_id: PairId,
-        change: &mut dyn FnMut(&mut PairingRecord),
-    ) -> Result<(), StoreError> {
-        let record = self
-            .records
-            .iter_mut()
-            .find(|entry| entry.pair_id == pair_id)
-            .ok_or(StoreError::Unknown)?;
-        change(record);
-        Ok(())
     }
 
     fn remove(&mut self, pair_id: PairId) -> Result<(), StoreError> {
@@ -251,39 +209,31 @@ impl OperationJournal for MemoryJournal {
 )]
 mod tests {
     use super::{
-        JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, PairingDisposition,
-        PairingRecord, PairingStore, StoreError,
+        JournalEntry, MemoryJournal, MemoryPairingStore, OperationJournal, PairingRecord,
+        PairingStore, StoreError,
     };
-    use crate::ids::{OperationId, PairId, RendezvousToken};
+    use crate::ids::{OperationId, PairId};
     use crate::states::OperationState;
     use zeroize::Zeroizing;
 
     fn record(pair_id: PairId) -> PairingRecord {
         PairingRecord {
             pair_id,
-            rendezvous_token: RendezvousToken([9; 16]),
             local_private: Zeroizing::new(vec![1; 32]),
             local_public: vec![2; 32],
             peer_public: vec![3; 32],
             granted_profiles: vec!["fi.eid.card-status.v1".into()],
-            grants_hash: [4; 32],
             peer_display_name: "Phone".into(),
             peer_platform: "iOS".into(),
-            disposition: PairingDisposition::Paired,
-            peer_initiated_termination: false,
-            candidate_failures: 0,
         }
     }
 
     #[test]
-    fn pairing_records_round_trip_and_update() {
+    fn pairing_records_live_until_removed() {
         let mut store = MemoryPairingStore::new();
         let pair_id = PairId([7; 16]);
         store.insert(record(pair_id)).unwrap();
-        store
-            .update(pair_id, &mut |entry| entry.candidate_failures += 1)
-            .unwrap();
-        assert_eq!(store.get(pair_id).unwrap().candidate_failures, 1);
+        assert_eq!(store.get(pair_id).unwrap().peer_display_name, "Phone");
         store.remove(pair_id).unwrap();
         assert!(matches!(store.get(pair_id), Err(StoreError::Unknown)));
     }
