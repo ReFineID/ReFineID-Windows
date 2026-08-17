@@ -492,6 +492,40 @@ impl CardModel {
         card.apply_records_to_containers();
         Some(card)
     }
+
+    /// Build the card model for a remote card from its authentication
+    /// certificate alone: one authentication container, no qualified-signature
+    /// container. The remote card serves `browser_authenticate`, which uses the
+    /// authentication key; the signature key is not exposed over the pipe. PIN
+    /// entry is external (on the phone), reported at the property layer. `None`
+    /// if the certificate cannot be parsed or its key classified.
+    pub(crate) fn build_remote_model(auth_cert_der: Vec<u8>) -> Option<CardCapabilityModel> {
+        let auth_cert = OwnedCert::from_der(&auth_cert_der).ok()?;
+        let auth_key_alg = Self::detect_key_algorithm(&auth_cert)?;
+        let auth_container = ContainerDescriptor {
+            index: CARD_DEFAULT_CONTAINER,
+            guid: Guid::parse(AUTH_CONTAINER_GUID).ok()?,
+            pin_id: PIN_ID_AUTH,
+            cert_der: auth_cert_der,
+            key_alg: auth_key_alg,
+            key_ref: KEY_REF_AUTH,
+            allow_sign: true,
+            allow_decrypt: false,
+            allow_pss: matches!(auth_key_alg, KeyAlgorithm::Rsa { .. }),
+            cmap_flags: CONTAINER_MAP_VALID_CONTAINER | CONTAINER_MAP_DEFAULT_CONTAINER,
+            reported_sig_bits: auth_key_alg.bits(),
+            reported_keyex_bits: 0,
+            sig_file: "ksc00".to_owned(),
+            keyex_file: None,
+        };
+        let containers = vec![auth_container];
+        let mut card = CardCapabilityModel {
+            cmapfile_records: Self::default_cmapfile_records(&containers),
+            containers,
+        };
+        card.apply_records_to_containers();
+        Some(card)
+    }
 }
 
 #[cfg(test)]

@@ -163,22 +163,35 @@ internal sealed partial class MainPage : Page
             this.HolderText.Visibility = Visibility.Visible;
             this.ForgetIdentityButton.Visibility = Visibility.Visible;
             this.ConnectRemoteReaderButton.Visibility = Visibility.Collapsed;
-            this.ShowSuccess($"Read the remote card of {holder}.");
 
             // The pairing is the live connection and stays up behind the
             // identity: keep the handle and watch it, so the row clears the
             // moment the phone side goes away.
             this.activeHandle = handle;
             this.StartLivenessWatch();
+            this.ShowSuccess($"Read the remote card of {holder}.");
         }
         catch (NativeRappException error)
         {
             this.ShowError(error.Message);
             NativeRappService.EndPairing(handle);
+            return;
         }
         finally
         {
             this.SetBusy(false);
+        }
+
+        // Publish the card so Windows apps can use it while the pairing is live.
+        // This caches the certificate over one more phone approval; a failure
+        // leaves the identity shown, only not offered to Windows.
+        try
+        {
+            await Task.Run(() => NativeRappService.PublishCard(handle)).ConfigureAwait(true);
+        }
+        catch (NativeRappException error)
+        {
+            this.ShowError(error.Message);
         }
     }
 
@@ -223,6 +236,16 @@ internal sealed partial class MainPage : Page
         if (this.activeHandle is ulong handle)
         {
             this.activeHandle = null;
+            // Stop publishing before the pairing ends; the pipe service is torn
+            // down either way, but this closes it cleanly first.
+            try
+            {
+                NativeRappService.UnpublishCard(handle);
+            }
+            catch (NativeRappException)
+            {
+                // The pairing may already be gone; ending the handle is enough.
+            }
             NativeRappService.EndPairing(handle);
         }
 

@@ -7,6 +7,7 @@ members = [
     "crates/refineid-minidriver",
     "crates/refineid-msi",
     "crates/refineid-rapp-cli",
+    "crates/refineid-remote-card-pipe",
     "crates/refineid-rapp-core",
     "crates/refineid-rapp-ffi",
     "crates/refineid-settings-ffi",
@@ -26,6 +27,7 @@ refineid-lib-core = { path = "crates/refineid-lib-core", version = "26" }
 refineid-lib-pcsc = { path = "crates/refineid-lib-pcsc", version = "26" }
 refineid-card-manager-core = { path = "crates/refineid-card-manager-core", version = "26" }
 refineid-rapp-core = { path = "crates/refineid-rapp-core", version = "26" }
+refineid-remote-card-pipe = { path = "crates/refineid-remote-card-pipe", version = "26" }
 refineid-windows-credential-store = { path = "crates/refineid-windows-credential-store", version = "26" }
 
 aes = "0.9"

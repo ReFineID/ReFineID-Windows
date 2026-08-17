@@ -92,6 +92,8 @@ mod ffi;
 #[cfg(windows)]
 mod msroots;
 #[cfg(windows)]
+mod remote;
+#[cfg(windows)]
 mod transport;
 
 #[cfg(windows)]

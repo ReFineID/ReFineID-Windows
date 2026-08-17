@@ -771,6 +771,7 @@ name = "refineid-minidriver"
 version = "26.8.10"
 dependencies = [
  "refineid-lib-core",
+ "refineid-remote-card-pipe",
  "refineid-windows-credential-store",
 ]
 
@@ -810,9 +811,14 @@ version = "26.8.10"
 dependencies = [
  "hex",
  "refineid-rapp-core",
+ "refineid-remote-card-pipe",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "refineid-remote-card-pipe"
+version = "26.8.10"
 
 [[package]]
 name = "refineid-settings-ffi"

@@ -80,6 +80,12 @@ internal static partial class NativeRappService
     [LibraryImport(Library, EntryPoint = "refineid_rapp_check_pairing")]
     private static partial nint CheckPairingNative(ulong handle);
 
+    [LibraryImport(Library, EntryPoint = "refineid_rapp_publish_card")]
+    private static partial nint PublishCardNative(ulong handle);
+
+    [LibraryImport(Library, EntryPoint = "refineid_rapp_unpublish_card")]
+    private static partial nint UnpublishCardNative(ulong handle);
+
     [LibraryImport(Library, EntryPoint = "refineid_rapp_string_free")]
     private static partial void StringFree(nint value);
 
@@ -148,6 +154,24 @@ internal static partial class NativeRappService
     internal static void CheckPairing(ulong handle) =>
         _ = Invoke(
             () => CheckPairingNative(handle),
+            RappJsonContext.Default.NativeEnvelopeAcknowledgement
+        );
+
+    /// <summary>
+    /// Publishes the paired card to Windows apps over the local pipe. Reads and
+    /// caches the authentication certificate first, so the holder approves once
+    /// on the phone.
+    /// </summary>
+    internal static void PublishCard(ulong handle) =>
+        _ = Invoke(
+            () => PublishCardNative(handle),
+            RappJsonContext.Default.NativeEnvelopeAcknowledgement
+        );
+
+    /// <summary>Stops publishing the paired card. The pairing stays live.</summary>
+    internal static void UnpublishCard(ulong handle) =>
+        _ = Invoke(
+            () => UnpublishCardNative(handle),
             RappJsonContext.Default.NativeEnvelopeAcknowledgement
         );
 

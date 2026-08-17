@@ -22,4 +22,5 @@ name = "refineid_minidriver"
 # none (satisfies `unused_crate_dependencies`).
 [target.'cfg(windows)'.dependencies]
 refineid-lib-core.workspace = true
+refineid-remote-card-pipe.workspace = true
 refineid-windows-credential-store.workspace = true

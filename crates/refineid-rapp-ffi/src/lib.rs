@@ -50,7 +50,7 @@ use refineid_rapp_core::ids::{OfferId, PairingSecret};
 use refineid_rapp_core::limits::OFFER_TTL_MAX_MS;
 use refineid_rapp_core::message::CloseReason;
 use refineid_rapp_core::offer::{PairingOffer, TransportCandidate};
-use refineid_rapp_core::operations::{CardOperation, CardOperationResult};
+use refineid_rapp_core::operations::{CardOperation, CardOperationResult, CertificateKind};
 use refineid_rapp_core::profiles::{
     PROFILE_AUTHENTICATION, PROFILE_CARD_STATUS, PROFILE_DOCUMENT_SIGNING,
 };
@@ -58,7 +58,11 @@ use refineid_rapp_core::store::{MemoryJournal, MemoryPairingStore};
 use refineid_rapp_core::stream::{StreamListener, stream_candidate_parameters};
 use refineid_rapp_core::transport::{STREAM_PROFILE, TcpFrameTransport};
 use refineid_rapp_core::{PAIRING_SUITE, WIRE_VERSION};
+#[cfg(windows)]
+use refineid_remote_card_pipe::{KeyProfile, Response, SignatureAlgorithm};
 use serde::Serialize;
+
+mod card_service;
 
 /// The one stream candidate this requester advertises.
 const CANDIDATE_ID: &str = "stream-1";
@@ -178,6 +182,10 @@ struct Shared {
     decision_tx: Option<Sender<Option<Vec<String>>>>,
     end_requested: bool,
     paired: Option<Paired>,
+    /// The local pipe service publishing this pairing's card to Windows, once
+    /// the caller has published it. Dropped (which stops and joins the service
+    /// thread) when the pairing ends or the card is unpublished.
+    service: Option<card_service::CardService>,
 }
 
 /// One pairing handle: its shared state, the background pairing thread, and
@@ -368,6 +376,97 @@ pub extern "C" fn refineid_rapp_check_pairing(handle: u64) -> *mut c_char {
     })
 }
 
+/// Publish the paired card to Windows over the local named pipe.
+///
+/// Reads and caches the authentication certificate over the live pairing (one
+/// phone approval), then starts the pipe service that answers the minidriver's
+/// certificate, status, and sign requests. Publishing again replaces the
+/// service. The certificate and status are served from the cache; only a
+/// signature reaches the phone, as a typed `browser_authenticate`.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_rapp_publish_card(handle: u64) -> *mut c_char {
+    reply_json(|| {
+        let cert_der = {
+            let mut paired = take_paired(handle)?;
+            let result = run_operation(
+                &mut paired,
+                &CardOperation::ReadCertificate {
+                    kind: CertificateKind::Authentication,
+                },
+            );
+            restore_paired(handle, paired);
+            match result? {
+                CardOperationResult::Certificate(der) => der,
+                _ => return Err(unexpected_result("read_certificate")),
+            }
+        };
+        // Replace any prior service, dropping it outside the registry lock, so
+        // its join never contends with a request thread holding that lock.
+        drop(take_card_service(handle));
+        let service = card_service::CardService::start(handle, cert_der, String::new());
+        if registry_entry_apply(handle, move |shared| shared.service = Some(service)).is_none() {
+            return Err(ApiFailure::new("unknown_handle", "No such pairing handle."));
+        }
+        Ok(AckDto { ok: true })
+    })
+}
+
+/// Unpublish the paired card: stop the pipe service. The pairing stays live.
+#[unsafe(no_mangle)]
+pub extern "C" fn refineid_rapp_unpublish_card(handle: u64) -> *mut c_char {
+    reply_json(|| {
+        drop(take_card_service(handle));
+        Ok(AckDto { ok: true })
+    })
+}
+
+/// Sign a digest for the pipe service over the live pairing. Runs one typed
+/// `browser_authenticate`; the holder approves and enters PIN1 on the phone.
+/// A busy session yields [`Response::Busy`] so the client retries rather than
+/// blocks; a session-ending outcome yields [`Response::Unavailable`].
+#[cfg(windows)]
+pub(crate) fn service_sign(
+    handle_id: u64,
+    key_profile: KeyProfile,
+    algorithm: SignatureAlgorithm,
+    digest: Vec<u8>,
+) -> Response {
+    let mut paired = match take_paired(handle_id) {
+        Ok(paired) => paired,
+        Err(failure) => {
+            return if failure.code == "not_paired" {
+                Response::Busy
+            } else {
+                Response::Unavailable
+            };
+        }
+    };
+    let operation = card_service::browser_authenticate(key_profile, algorithm, digest);
+    let result = run_operation(&mut paired, &operation);
+    restore_paired(handle_id, paired);
+    match result {
+        Ok(CardOperationResult::Signature(bytes)) => Response::Signature(bytes),
+        Ok(_) => Response::Protocol,
+        Err(failure) => match failure.code {
+            "denied" | "cancelled" => Response::Denied,
+            _ => Response::Unavailable,
+        },
+    }
+}
+
+/// Take the pipe service out of a handle's shared state under the lock,
+/// returning it so the caller drops it without holding the lock.
+#[allow(
+    clippy::significant_drop_tightening,
+    reason = "the guard yields a borrow that must outlive it in this lock chain"
+)]
+fn take_card_service(handle_id: u64) -> Option<card_service::CardService> {
+    let registry = REGISTRY.lock().ok()?;
+    let entry = registry.get(&handle_id)?;
+    let mut shared = entry.shared.lock().ok()?;
+    shared.service.take()
+}
+
 #[allow(
     clippy::significant_drop_tightening,
     reason = "the guard yields a borrow that must outlive it in this lock chain"
@@ -412,13 +511,16 @@ pub extern "C" fn refineid_rapp_end_pairing(handle: u64) -> *mut c_char {
         };
         // Wake the background thread if it is still blocked on accept, then
         // let its own drop release the listener and requester.
-        let paired = entry.shared.lock().map_or(None, |mut shared| {
+        let (paired, service) = entry.shared.lock().map_or((None, None), |mut shared| {
             shared.end_requested = true;
             if let Some(decision_tx) = shared.decision_tx.take() {
                 let _ = decision_tx.send(None);
             }
-            shared.paired.take()
+            (shared.paired.take(), shared.service.take())
         });
+        // Stop the pipe service now, with the lock released, so its join does
+        // not contend with a request thread reaching for the registry.
+        drop(service);
         if let Some(mut paired) = paired {
             let Paired { requester, session } = &mut paired;
             requester.disconnect(session, CloseReason::UserDisconnect);
@@ -494,6 +596,7 @@ fn begin_pairing(
         decision_tx: None,
         end_requested: false,
         paired: None,
+        service: None,
     });
     {
         let mut registry = lock_registry()?;
