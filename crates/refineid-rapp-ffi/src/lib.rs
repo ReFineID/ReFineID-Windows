@@ -417,11 +417,21 @@ fn begin_pairing(
     advertise: &[String],
     name: String,
 ) -> Result<BeginPairingDto, ApiFailure> {
-    let listener = StreamListener::bind(listen, CANDIDATE_ID, receive_deadline())
-        .map_err(|error| ApiFailure::new("listen_failed", format!("{error:?}")))?;
-    let port = listener
-        .local_port()
-        .map_err(|error| ApiFailure::new("port_unavailable", format!("{error:?}")))?;
+    let listener =
+        StreamListener::bind(listen, CANDIDATE_ID, receive_deadline()).map_err(|_error| {
+            ApiFailure::new(
+                "listen_failed",
+                "Could not open the network port to wait for the phone. \
+                 Another ReFineID window may already be waiting for a connection; \
+                 close it and try again.",
+            )
+        })?;
+    let port = listener.local_port().map_err(|_error| {
+        ApiFailure::new(
+            "port_unavailable",
+            "The network port opened but its number could not be read.",
+        )
+    })?;
 
     let pairing_store = CredentialPairingStore::load()
         .map_err(|error| ApiFailure::new("pairing_store_unavailable", format!("{error}")))?;
