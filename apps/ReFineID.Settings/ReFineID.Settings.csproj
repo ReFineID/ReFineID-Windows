@@ -7,7 +7,8 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
-    <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')">win-$(Platform).pubxml</PublishProfile>
+    <PublishProfile Condition="Exists('Properties\PublishProfiles\win-$(Platform).pubxml')"
+      >win-$(Platform).pubxml</PublishProfile>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
     <EnableMsixTooling>true</EnableMsixTooling>
@@ -15,7 +16,8 @@
     <EnableMsixTooling Condition="'$(Configuration)' == 'Debug'">false</EnableMsixTooling>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <RustCargo Condition="Exists('$(USERPROFILE)\.cargo\bin\cargo.exe')">$(USERPROFILE)\.cargo\bin\cargo.exe</RustCargo>
+    <RustCargo Condition="Exists('$(USERPROFILE)\.cargo\bin\cargo.exe')"
+      >$(USERPROFILE)\.cargo\bin\cargo.exe</RustCargo>
     <RustCargo Condition="'$(RustCargo)' == ''">cargo</RustCargo>
     <RustProfile Condition="'$(Configuration)' == 'Release'">release</RustProfile>
     <RustProfile Condition="'$(RustProfile)' == ''">debug</RustProfile>
@@ -39,7 +41,8 @@
     <Content
       Include="..\..\target\$(RustProfile)\refineid_settings_ffi.dll"
       Link="refineid_settings_ffi.dll"
-      CopyToOutputDirectory="PreserveNewest" />
+      CopyToOutputDirectory="PreserveNewest"
+    />
   </ItemGroup>
 
   <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
@@ -66,6 +69,7 @@
   <Target Name="BuildRustSettingsBridge" BeforeTargets="PrepareForBuild">
     <Exec
       Command="&quot;$(RustCargo)&quot; build -p refineid-settings-ffi $(RustReleaseArgument)"
-      WorkingDirectory="$(MSBuildProjectDirectory)\..\.." />
+      WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+    />
   </Target>
 </Project>

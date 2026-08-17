@@ -43,7 +43,12 @@ internal sealed partial class PairingDialog : ContentDialog
 
     private readonly string offerUri;
 
-    public PairingDialog(ulong handle, string offerUri, DispatcherQueue dispatcher, TimeSpan pollInterval)
+    public PairingDialog(
+        ulong handle,
+        string offerUri,
+        DispatcherQueue dispatcher,
+        TimeSpan pollInterval
+    )
     {
         this.InitializeComponent();
         this.handle = handle;
@@ -142,9 +147,7 @@ internal sealed partial class PairingDialog : ContentDialog
             return;
         }
 
-        this.StatusText.Text = peer is null
-            ? "Pairing…"
-            : $"Pairing with {peer.DisplayName}…";
+        this.StatusText.Text = peer is null ? "Pairing…" : $"Pairing with {peer.DisplayName}…";
         this.QrFrame.Visibility = Visibility.Collapsed;
     }
 

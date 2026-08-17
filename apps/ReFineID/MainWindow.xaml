@@ -22,7 +22,8 @@
     xmlns:local="using:ReFineID"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="ReFineID"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+>
     <Window.SystemBackdrop>
         <MicaBackdrop />
     </Window.SystemBackdrop>

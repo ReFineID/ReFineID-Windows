@@ -21,7 +21,8 @@ using Microsoft.UI.Xaml;
 [SuppressMessage(
     "Design",
     "CA1515:Consider making public types internal",
-    Justification = "The WinUI XAML generator declares the application class as public.")]
+    Justification = "The WinUI XAML generator declares the application class as public."
+)]
 public partial class App : Application
 {
     private Window? window;

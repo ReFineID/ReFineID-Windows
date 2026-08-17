@@ -22,7 +22,8 @@
     xmlns:local="using:ReFineID_Settings"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Title="ReFineID Settings"
-    mc:Ignorable="d">
+    mc:Ignorable="d"
+>
     <Window.SystemBackdrop>
         <MicaBackdrop />
     </Window.SystemBackdrop>

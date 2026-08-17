@@ -21,8 +21,8 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     Loaded="Page_Loaded"
-    mc:Ignorable="d">
-
+    mc:Ignorable="d"
+>
     <Grid>
         <ScrollViewer>
             <StackPanel
@@ -30,21 +30,21 @@
                 MaxWidth="920"
                 Padding="32,24,32,48"
                 HorizontalAlignment="Stretch"
-                Spacing="20">
+                Spacing="20"
+            >
                 <StackPanel Spacing="4">
                     <TextBlock
                         Style="{ThemeResource TitleTextBlockStyle}"
-                        Text="Citizen certificate card" />
+                        Text="Citizen certificate card"
+                    />
                     <TextBlock
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                         Text="Inspect, activate, change, and recover FINEID credentials through the native Windows smart-card stack."
-                        TextWrapping="Wrap" />
+                        TextWrapping="Wrap"
+                    />
                 </StackPanel>
 
-                <InfoBar
-                    x:Name="StatusInfoBar"
-                    IsClosable="True"
-                    IsOpen="False" />
+                <InfoBar x:Name="StatusInfoBar" IsClosable="True" IsOpen="False" />
 
                 <Grid ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
@@ -56,12 +56,14 @@
                         Header="Card reader"
                         HorizontalAlignment="Stretch"
                         PlaceholderText="No card-present reader"
-                        SelectionChanged="ReaderComboBox_SelectionChanged" />
+                        SelectionChanged="ReaderComboBox_SelectionChanged"
+                    />
                     <Button
                         Grid.Column="1"
                         VerticalAlignment="Bottom"
                         Click="RefreshButton_Click"
-                        Content="Refresh" />
+                        Content="Refresh"
+                    />
                 </Grid>
 
                 <Border
@@ -71,7 +73,8 @@
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="8"
-                    Visibility="Collapsed">
+                    Visibility="Collapsed"
+                >
                     <Grid ColumnSpacing="20" RowSpacing="10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="160" />
@@ -88,22 +91,21 @@
                         </Grid.RowDefinitions>
 
                         <TextBlock FontWeight="SemiBold" Text="Card holder" />
-                        <TextBlock
-                            x:Name="PersonText"
-                            Grid.Column="1"
-                            TextWrapping="Wrap" />
+                        <TextBlock x:Name="PersonText" Grid.Column="1" TextWrapping="Wrap" />
                         <TextBlock Grid.Row="1" FontWeight="SemiBold" Text="Card model" />
                         <TextBlock
                             x:Name="ModelText"
                             Grid.Row="1"
                             Grid.Column="1"
-                            TextWrapping="Wrap" />
+                            TextWrapping="Wrap"
+                        />
                         <TextBlock Grid.Row="2" FontWeight="SemiBold" Text="Card serial" />
                         <TextBlock
                             x:Name="SerialText"
                             Grid.Row="2"
                             Grid.Column="1"
-                            TextWrapping="Wrap" />
+                            TextWrapping="Wrap"
+                        />
                         <TextBlock Grid.Row="3" FontWeight="SemiBold" Text="PIN1" />
                         <TextBlock x:Name="Pin1StatusText" Grid.Row="3" Grid.Column="1" />
                         <TextBlock Grid.Row="4" FontWeight="SemiBold" Text="PIN2" />
@@ -119,7 +121,8 @@
                     <StackPanel Padding="0,12,0,4" Spacing="12">
                         <TextBlock
                             Text="Enter the six-digit CAN printed on the card to prove SELECT MF, PACE, and protected PKCS #15 reads. After the proof succeeds, ReFineID stores only the CAN in your Windows Credential Manager for this contactless card family. The CAN is not logged."
-                            TextWrapping="Wrap" />
+                            TextWrapping="Wrap"
+                        />
                         <Grid ColumnSpacing="12">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="220" />
@@ -129,19 +132,22 @@
                                 x:Name="CanBox"
                                 Header="Card access number (CAN)"
                                 MaxLength="6"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <Button
                                 Grid.Column="1"
                                 VerticalAlignment="Bottom"
                                 Click="EnableNfcButton_Click"
-                                Content="Enable NFC access" />
+                                Content="Enable NFC access"
+                            />
                         </Grid>
                         <Border
                             x:Name="NfcResultPanel"
                             Padding="12"
                             Background="{ThemeResource SubtleFillColorSecondaryBrush}"
                             CornerRadius="6"
-                            Visibility="Collapsed">
+                            Visibility="Collapsed"
+                        >
                             <TextBlock x:Name="NfcResultText" TextWrapping="Wrap" />
                         </Border>
                     </StackPanel>
@@ -151,22 +157,22 @@
                     x:Name="ManagementPanel"
                     IsHitTestVisible="False"
                     Opacity="0.6"
-                    Spacing="12">
+                    Spacing="12"
+                >
                     <TextBlock
                         Style="{ThemeResource SubtitleTextBlockStyle}"
-                        Text="Card management" />
+                        Text="Card management"
+                    />
                     <InfoBar
                         IsOpen="True"
                         IsClosable="False"
                         Severity="Informational"
-                        Message="PIN1 authenticates browser and system logins. PIN2 is only for qualified signatures; PIN2 and the recovery code do not gate PIN1 authentication." />
+                        Message="PIN1 authenticates browser and system logins. PIN2 is only for qualified signatures; PIN2 and the recovery code do not gate PIN1 authentication."
+                    />
 
                     <Expander Header="Change PIN">
                         <StackPanel Padding="0,12,0,4" Spacing="10">
-                            <ComboBox
-                                x:Name="ChangeSlotBox"
-                                Header="Credential"
-                                SelectedIndex="0">
+                            <ComboBox x:Name="ChangeSlotBox" Header="Credential" SelectedIndex="0">
                                 <ComboBoxItem Content="PIN1 - authentication" />
                                 <ComboBoxItem Content="PIN2 - qualified signature" />
                             </ComboBox>
@@ -174,21 +180,25 @@
                                 x:Name="CurrentPinBox"
                                 Header="Current PIN"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="NewPinBox"
                                 Header="New PIN"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="NewPinConfirmationBox"
                                 Header="Confirm new PIN"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <Button
                                 HorizontalAlignment="Left"
                                 Click="ChangePinButton_Click"
-                                Content="Change PIN" />
+                                Content="Change PIN"
+                            />
                         </StackPanel>
                     </Expander>
 
@@ -196,11 +206,9 @@
                         <StackPanel Padding="0,12,0,4" Spacing="10">
                             <TextBlock
                                 Text="The recovery code replaces the selected PIN and resets its retry counter. A wrong recovery code consumes one of the recovery attempts."
-                                TextWrapping="Wrap" />
-                            <ComboBox
-                                x:Name="UnblockSlotBox"
-                                Header="Credential"
-                                SelectedIndex="1">
+                                TextWrapping="Wrap"
+                            />
+                            <ComboBox x:Name="UnblockSlotBox" Header="Credential" SelectedIndex="1">
                                 <ComboBoxItem Content="PIN1 - authentication" />
                                 <ComboBoxItem Content="PIN2 - qualified signature" />
                             </ComboBox>
@@ -208,21 +216,25 @@
                                 x:Name="PukBox"
                                 Header="Recovery code (PUK)"
                                 MaxLength="8"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="UnblockNewPinBox"
                                 Header="New PIN"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="UnblockConfirmationBox"
                                 Header="Confirm new PIN"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <Button
                                 HorizontalAlignment="Left"
                                 Click="UnblockPinButton_Click"
-                                Content="Reset PIN" />
+                                Content="Reset PIN"
+                            />
                         </StackPanel>
                     </Expander>
 
@@ -231,57 +243,53 @@
                             <TextBlock
                                 x:Name="ActivationHintText"
                                 Text="Activation is refused when the card already looks active."
-                                TextWrapping="Wrap" />
+                                TextWrapping="Wrap"
+                            />
                             <PasswordBox
                                 x:Name="ActivationCodeBox"
                                 Header="Activation code"
                                 MaxLength="8"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="ActivationPin1Box"
                                 Header="New PIN1"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="ActivationPin1ConfirmationBox"
                                 Header="Confirm new PIN1"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="ActivationPin2Box"
                                 Header="New PIN2"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <PasswordBox
                                 x:Name="ActivationPin2ConfirmationBox"
                                 Header="Confirm new PIN2"
                                 MaxLength="12"
-                                PasswordRevealMode="Peek" />
+                                PasswordRevealMode="Peek"
+                            />
                             <Button
                                 HorizontalAlignment="Left"
                                 Click="ActivateButton_Click"
-                                Content="Activate card" />
+                                Content="Activate card"
+                            />
                         </StackPanel>
                     </Expander>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>
 
-        <Border
-            x:Name="BusyOverlay"
-            Background="#66000000"
-            Visibility="Collapsed">
-            <StackPanel
-                HorizontalAlignment="Center"
-                VerticalAlignment="Center"
-                Spacing="12">
-                <ProgressRing
-                    Width="48"
-                    Height="48"
-                    IsActive="True" />
-                <TextBlock
-                    Foreground="White"
-                    Text="Working with the card..." />
+        <Border x:Name="BusyOverlay" Background="#66000000" Visibility="Collapsed">
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
+                <ProgressRing Width="48" Height="48" IsActive="True" />
+                <TextBlock Foreground="White" Text="Working with the card..." />
             </StackPanel>
         </Border>
     </Grid>

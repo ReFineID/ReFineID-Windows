@@ -38,9 +38,7 @@ public sealed partial class MainPage : Page
         await RefreshReadersAsync();
     }
 
-    private async void ReaderComboBox_SelectionChanged(
-        object sender,
-        SelectionChangedEventArgs e)
+    private async void ReaderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_refreshingReaders || _busy)
         {
@@ -61,22 +59,23 @@ public sealed partial class MainPage : Page
 
         string can = CanBox.Password;
         CanBox.Password = string.Empty;
-        await RunCardOperationAsync(
-            async () =>
-            {
-                ContactlessSnapshot snapshot = await Task.Run(
-                    () => NativeCardService.PrimeContactless(reader, can));
-                NfcResultText.Text =
-                    $"Secure NFC channel opened for {DisplayPerson(snapshot.Person)}. "
-                    + $"Card serial: {snapshot.Serial}. "
-                    + $"PIN1: {FormatStatus(snapshot.Pin1)}; "
-                    + $"PIN2: {FormatStatus(snapshot.Pin2)}; "
-                    + "recovery: not queried over NFC.";
-                NfcResultPanel.Visibility = Visibility.Visible;
-                ShowSuccess(
-                    "Contactless access enabled",
-                    "PACE succeeded and the CAN was saved in Windows Credential Manager.");
-            });
+        await RunCardOperationAsync(async () =>
+        {
+            ContactlessSnapshot snapshot = await Task.Run(() =>
+                NativeCardService.PrimeContactless(reader, can)
+            );
+            NfcResultText.Text =
+                $"Secure NFC channel opened for {DisplayPerson(snapshot.Person)}. "
+                + $"Card serial: {snapshot.Serial}. "
+                + $"PIN1: {FormatStatus(snapshot.Pin1)}; "
+                + $"PIN2: {FormatStatus(snapshot.Pin2)}; "
+                + "recovery: not queried over NFC.";
+            NfcResultPanel.Visibility = Visibility.Visible;
+            ShowSuccess(
+                "Contactless access enabled",
+                "PACE succeeded and the CAN was saved in Windows Credential Manager."
+            );
+        });
     }
 
     private async void ChangePinButton_Click(object sender, RoutedEventArgs e)
@@ -92,14 +91,9 @@ public sealed partial class MainPage : Page
         string confirmation = NewPinConfirmationBox.Password;
         Clear(CurrentPinBox, NewPinBox, NewPinConfirmationBox);
 
-        await RunMutationAsync(
-            () => NativeCardService.ChangePin(
-                reader,
-                serial,
-                slot,
-                current,
-                next,
-                confirmation));
+        await RunMutationAsync(() =>
+            NativeCardService.ChangePin(reader, serial, slot, current, next, confirmation)
+        );
     }
 
     private async void UnblockPinButton_Click(object sender, RoutedEventArgs e)
@@ -115,14 +109,9 @@ public sealed partial class MainPage : Page
         string confirmation = UnblockConfirmationBox.Password;
         Clear(PukBox, UnblockNewPinBox, UnblockConfirmationBox);
 
-        await RunMutationAsync(
-            () => NativeCardService.UnblockPin(
-                reader,
-                serial,
-                slot,
-                puk,
-                next,
-                confirmation));
+        await RunMutationAsync(() =>
+            NativeCardService.UnblockPin(reader, serial, slot, puk, next, confirmation)
+        );
     }
 
     private async void ActivateButton_Click(object sender, RoutedEventArgs e)
@@ -142,10 +131,11 @@ public sealed partial class MainPage : Page
             ActivationPin1Box,
             ActivationPin1ConfirmationBox,
             ActivationPin2Box,
-            ActivationPin2ConfirmationBox);
+            ActivationPin2ConfirmationBox
+        );
 
-        await RunMutationAsync(
-            () => NativeCardService.Activate(
+        await RunMutationAsync(() =>
+            NativeCardService.Activate(
                 reader,
                 serial,
                 activationCode,
@@ -153,7 +143,9 @@ public sealed partial class MainPage : Page
                 pin1Confirmation,
                 pin2,
                 pin2Confirmation,
-                allowReactivate: false));
+                allowReactivate: false
+            )
+        );
     }
 
     private async Task RefreshReadersAsync()
@@ -164,35 +156,35 @@ public sealed partial class MainPage : Page
         }
 
         string? previous = SelectedReader();
-        await RunCardOperationAsync(
-            async () =>
+        await RunCardOperationAsync(async () =>
+        {
+            string[] readers = await Task.Run(NativeCardService.PresentReaders);
+            _refreshingReaders = true;
+            try
             {
-                string[] readers = await Task.Run(NativeCardService.PresentReaders);
-                _refreshingReaders = true;
-                try
-                {
-                    ReaderComboBox.ItemsSource = readers;
-                    ReaderComboBox.SelectedItem = previous is not null
-                        && readers.Contains(previous, StringComparer.Ordinal)
-                            ? previous
-                            : readers.FirstOrDefault();
-                }
-                finally
-                {
-                    _refreshingReaders = false;
-                }
+                ReaderComboBox.ItemsSource = readers;
+                ReaderComboBox.SelectedItem =
+                    previous is not null && readers.Contains(previous, StringComparer.Ordinal)
+                        ? previous
+                        : readers.FirstOrDefault();
+            }
+            finally
+            {
+                _refreshingReaders = false;
+            }
 
-                if (readers.Length == 0)
-                {
-                    ClearCard();
-                    ShowNotice(
-                        "No card found",
-                        "Insert a FINEID card or place it on an NFC reader, then refresh.");
-                    return;
-                }
+            if (readers.Length == 0)
+            {
+                ClearCard();
+                ShowNotice(
+                    "No card found",
+                    "Insert a FINEID card or place it on an NFC reader, then refresh."
+                );
+                return;
+            }
 
-                await InspectSelectedReaderCoreAsync();
-            });
+            await InspectSelectedReaderCoreAsync();
+        });
     }
 
     private async Task InspectSelectedReaderAsync()
@@ -250,20 +242,19 @@ public sealed partial class MainPage : Page
 
     private async Task RunMutationAsync(Func<MutationResult> operation)
     {
-        await RunCardOperationAsync(
-            async () =>
+        await RunCardOperationAsync(async () =>
+        {
+            MutationResult result = await Task.Run(operation);
+            await InspectSelectedReaderCoreAsync(showReadyMessage: false);
+            if (result.Succeeded)
             {
-                MutationResult result = await Task.Run(operation);
-                await InspectSelectedReaderCoreAsync(showReadyMessage: false);
-                if (result.Succeeded)
-                {
-                    ShowSuccess("Card updated", result.Message);
-                }
-                else
-                {
-                    ShowWarning("The card was not updated", result.Message);
-                }
-            });
+                ShowSuccess("Card updated", result.Message);
+            }
+            else
+            {
+                ShowWarning("The card was not updated", result.Message);
+            }
+        });
     }
 
     private async Task RunCardOperationAsync(Func<Task> operation)
@@ -335,8 +326,7 @@ public sealed partial class MainPage : Page
             "locked" => "Blocked",
             "invalidated" => "Recovery unavailable",
             "no_information" => "No counter information",
-            "other" when status.StatusWord is ushort statusWord =>
-                $"Card status 0x{statusWord:X4}",
+            "other" when status.StatusWord is ushort statusWord => $"Card status 0x{statusWord:X4}",
             _ => status.State,
         };
 

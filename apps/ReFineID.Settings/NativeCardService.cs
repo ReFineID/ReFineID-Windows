@@ -144,8 +144,9 @@ internal static class NativeCardService
         byte[] readerBytes = Encoding.UTF8.GetBytes(reader);
         try
         {
-            return Invoke<CardSnapshot>(
-                () => NativeMethods.Inspect(readerBytes, (nuint)readerBytes.Length));
+            return Invoke<CardSnapshot>(() =>
+                NativeMethods.Inspect(readerBytes, (nuint)readerBytes.Length)
+            );
         }
         finally
         {
@@ -159,12 +160,14 @@ internal static class NativeCardService
         byte[] canBytes = Encoding.ASCII.GetBytes(can);
         try
         {
-            return Invoke<ContactlessSnapshot>(
-                () => NativeMethods.PrimeContactless(
+            return Invoke<ContactlessSnapshot>(() =>
+                NativeMethods.PrimeContactless(
                     readerBytes,
                     (nuint)readerBytes.Length,
                     canBytes,
-                    (nuint)canBytes.Length));
+                    (nuint)canBytes.Length
+                )
+            );
         }
         finally
         {
@@ -179,7 +182,8 @@ internal static class NativeCardService
         PinSlot slot,
         string currentPin,
         string newPin,
-        string confirmation)
+        string confirmation
+    )
     {
         byte[] readerBytes = Encoding.UTF8.GetBytes(reader);
         byte[] serialBytes = Encoding.UTF8.GetBytes(serial);
@@ -188,8 +192,8 @@ internal static class NativeCardService
         byte[] confirmationBytes = Encoding.ASCII.GetBytes(confirmation);
         try
         {
-            return Invoke<MutationResult>(
-                () => NativeMethods.ChangePin(
+            return Invoke<MutationResult>(() =>
+                NativeMethods.ChangePin(
                     readerBytes,
                     (nuint)readerBytes.Length,
                     serialBytes,
@@ -200,7 +204,9 @@ internal static class NativeCardService
                     newBytes,
                     (nuint)newBytes.Length,
                     confirmationBytes,
-                    (nuint)confirmationBytes.Length));
+                    (nuint)confirmationBytes.Length
+                )
+            );
         }
         finally
         {
@@ -214,7 +220,8 @@ internal static class NativeCardService
         PinSlot slot,
         string puk,
         string newPin,
-        string confirmation)
+        string confirmation
+    )
     {
         byte[] readerBytes = Encoding.UTF8.GetBytes(reader);
         byte[] serialBytes = Encoding.UTF8.GetBytes(serial);
@@ -223,8 +230,8 @@ internal static class NativeCardService
         byte[] confirmationBytes = Encoding.ASCII.GetBytes(confirmation);
         try
         {
-            return Invoke<MutationResult>(
-                () => NativeMethods.UnblockPin(
+            return Invoke<MutationResult>(() =>
+                NativeMethods.UnblockPin(
                     readerBytes,
                     (nuint)readerBytes.Length,
                     serialBytes,
@@ -235,7 +242,9 @@ internal static class NativeCardService
                     newBytes,
                     (nuint)newBytes.Length,
                     confirmationBytes,
-                    (nuint)confirmationBytes.Length));
+                    (nuint)confirmationBytes.Length
+                )
+            );
         }
         finally
         {
@@ -251,7 +260,8 @@ internal static class NativeCardService
         string pin1Confirmation,
         string newPin2,
         string pin2Confirmation,
-        bool allowReactivate)
+        bool allowReactivate
+    )
     {
         byte[] readerBytes = Encoding.UTF8.GetBytes(reader);
         byte[] serialBytes = Encoding.UTF8.GetBytes(serial);
@@ -262,8 +272,8 @@ internal static class NativeCardService
         byte[] pin2ConfirmationBytes = Encoding.ASCII.GetBytes(pin2Confirmation);
         try
         {
-            return Invoke<MutationResult>(
-                () => NativeMethods.Activate(
+            return Invoke<MutationResult>(() =>
+                NativeMethods.Activate(
                     readerBytes,
                     (nuint)readerBytes.Length,
                     serialBytes,
@@ -278,7 +288,9 @@ internal static class NativeCardService
                     (nuint)pin2Bytes.Length,
                     pin2ConfirmationBytes,
                     (nuint)pin2ConfirmationBytes.Length,
-                    allowReactivate ? (byte)1 : (byte)0));
+                    allowReactivate ? (byte)1 : (byte)0
+                )
+            );
         }
         finally
         {
@@ -289,7 +301,8 @@ internal static class NativeCardService
                 pin1Bytes,
                 pin1ConfirmationBytes,
                 pin2Bytes,
-                pin2ConfirmationBytes);
+                pin2ConfirmationBytes
+            );
         }
     }
 
@@ -300,32 +313,37 @@ internal static class NativeCardService
         {
             throw new NativeCardException(
                 "native_allocation_failed",
-                "The native card service did not return a response.");
+                "The native card service did not return a response."
+            );
         }
 
         try
         {
-            string json = Marshal.PtrToStringUTF8(response)
+            string json =
+                Marshal.PtrToStringUTF8(response)
                 ?? throw new NativeCardException(
                     "native_response_invalid",
-                    "The native card service returned invalid UTF-8.");
-            NativeEnvelope<T> envelope = JsonSerializer.Deserialize<NativeEnvelope<T>>(
-                json,
-                JsonOptions)
+                    "The native card service returned invalid UTF-8."
+                );
+            NativeEnvelope<T> envelope =
+                JsonSerializer.Deserialize<NativeEnvelope<T>>(json, JsonOptions)
                 ?? throw new NativeCardException(
                     "native_response_invalid",
-                    "The native card service returned invalid JSON.");
+                    "The native card service returned invalid JSON."
+                );
             if (!envelope.Ok)
             {
                 throw new NativeCardException(
                     envelope.Error?.Code ?? "native_error",
-                    envelope.Error?.Message ?? "The native card service failed.");
+                    envelope.Error?.Message ?? "The native card service failed."
+                );
             }
 
             return envelope.Data
                 ?? throw new NativeCardException(
                     "native_response_empty",
-                    "The native card service returned no data.");
+                    "The native card service returned no data."
+                );
         }
         finally
         {
@@ -370,16 +388,15 @@ internal static class NativeCardService
         internal static extern nint PresentReaders();
 
         [DllImport(Library, EntryPoint = "refineid_settings_inspect")]
-        internal static extern nint Inspect(
-            [In] byte[] reader,
-            nuint readerLength);
+        internal static extern nint Inspect([In] byte[] reader, nuint readerLength);
 
         [DllImport(Library, EntryPoint = "refineid_settings_prime_contactless")]
         internal static extern nint PrimeContactless(
             [In] byte[] reader,
             nuint readerLength,
             [In] byte[] can,
-            nuint canLength);
+            nuint canLength
+        );
 
         [DllImport(Library, EntryPoint = "refineid_settings_change_pin")]
         internal static extern nint ChangePin(
@@ -393,7 +410,8 @@ internal static class NativeCardService
             [In] byte[] newPin,
             nuint newPinLength,
             [In] byte[] confirmation,
-            nuint confirmationLength);
+            nuint confirmationLength
+        );
 
         [DllImport(Library, EntryPoint = "refineid_settings_unblock_pin")]
         internal static extern nint UnblockPin(
@@ -407,7 +425,8 @@ internal static class NativeCardService
             [In] byte[] newPin,
             nuint newPinLength,
             [In] byte[] confirmation,
-            nuint confirmationLength);
+            nuint confirmationLength
+        );
 
         [DllImport(Library, EntryPoint = "refineid_settings_activate")]
         internal static extern nint Activate(
@@ -425,7 +444,8 @@ internal static class NativeCardService
             nuint newPin2Length,
             [In] byte[] pin2Confirmation,
             nuint pin2ConfirmationLength,
-            byte allowReactivate);
+            byte allowReactivate
+        );
 
         [DllImport(Library, EntryPoint = "refineid_settings_string_free")]
         internal static extern void StringFree(nint value);

@@ -9,7 +9,8 @@
          Alt+Tab show it; AppWindow.SetIcon uses the same file at runtime. -->
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <Platforms>x64;arm64</Platforms>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'arm64'">win-arm64</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and '$(Platform)' == 'arm64'"
+      >win-arm64</RuntimeIdentifier>
     <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''">win-x64</RuntimeIdentifier>
     <UseWinUI>true</UseWinUI>
     <WinUISDKReferences>false</WinUISDKReferences>
@@ -39,7 +40,8 @@
     <Version>$(RefineIdVersion)</Version>
     <AssemblyVersion>$(RefineIdVersion)</AssemblyVersion>
     <FileVersion>$(RefineIdVersion)</FileVersion>
-    <RustCargo Condition="Exists('$(USERPROFILE)\.cargo\bin\cargo.exe')">$(USERPROFILE)\.cargo\bin\cargo.exe</RustCargo>
+    <RustCargo Condition="Exists('$(USERPROFILE)\.cargo\bin\cargo.exe')"
+      >$(USERPROFILE)\.cargo\bin\cargo.exe</RustCargo>
     <RustCargo Condition="'$(RustCargo)' == ''">cargo</RustCargo>
     <RustProfile Condition="'$(Configuration)' == 'Release'">release</RustProfile>
     <RustProfile Condition="'$(RustProfile)' == ''">debug</RustProfile>
@@ -63,7 +65,8 @@
     <Content
       Include="..\..\target\$(RustProfile)\refineid_rapp_ffi.dll"
       Link="refineid_rapp_ffi.dll"
-      CopyToOutputDirectory="PreserveNewest" />
+      CopyToOutputDirectory="PreserveNewest"
+    />
   </ItemGroup>
 
   <ItemGroup Condition="'$(DisableMsixProjectCapabilityAddedByProject)'!='true' and '$(EnableMsixTooling)'=='true'">
@@ -73,7 +76,10 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.2526" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools.WinApp" Version="0.5.0" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.3.1" />
-    <PackageReference Include="CommunityToolkit.WinUI.Controls.SettingsControls" Version="8.2.250402" />
+    <PackageReference
+      Include="CommunityToolkit.WinUI.Controls.SettingsControls"
+      Version="8.2.250402"
+    />
     <PackageReference Include="QRCoder" Version="1.6.0" />
   </ItemGroup>
 
@@ -84,9 +90,14 @@
   <!-- Builds the Rust requester bridge before the C# build. A machine that
        already has the cdylib next to the workspace target can skip this with
        -p:SkipRustBuild=true. -->
-  <Target Name="BuildRustRappBridge" BeforeTargets="PrepareForBuild" Condition="'$(SkipRustBuild)' != 'true'">
+  <Target
+    Name="BuildRustRappBridge"
+    BeforeTargets="PrepareForBuild"
+    Condition="'$(SkipRustBuild)' != 'true'"
+  >
     <Exec
       Command="&quot;$(RustCargo)&quot; build -p refineid-rapp-ffi $(RustReleaseArgument)"
-      WorkingDirectory="$(MSBuildProjectDirectory)\..\.." />
+      WorkingDirectory="$(MSBuildProjectDirectory)\..\.."
+    />
   </Target>
 </Project>

@@ -29,19 +29,13 @@ internal sealed class NativeRappException : Exception
         : base(message) => this.Code = code;
 
     internal NativeRappException()
-        : base("The remote-card service failed.")
-    {
-    }
+        : base("The remote-card service failed.") { }
 
     internal NativeRappException(string message)
-        : base(message)
-    {
-    }
+        : base(message) { }
 
     internal NativeRappException(string message, Exception innerException)
-        : base(message, innerException)
-    {
-    }
+        : base(message, innerException) { }
 }
 
 /// <summary>
@@ -61,13 +55,18 @@ internal static partial class NativeRappService
         [In] byte[] advertise,
         nuint advertiseLength,
         [In] byte[] name,
-        nuint nameLength);
+        nuint nameLength
+    );
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_poll_pairing")]
     private static partial nint PollPairingNative(ulong handle);
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_confirm_pairing")]
-    private static partial nint ConfirmPairingNative(ulong handle, [In] byte[] granted, nuint grantedLength);
+    private static partial nint ConfirmPairingNative(
+        ulong handle,
+        [In] byte[] granted,
+        nuint grantedLength
+    );
 
     [LibraryImport(Library, EntryPoint = "refineid_rapp_cancel_pairing")]
     private static partial nint CancelPairingNative(ulong handle);
@@ -88,14 +87,17 @@ internal static partial class NativeRappService
         byte[] advertiseBytes = Encoding.UTF8.GetBytes(advertise);
         byte[] nameBytes = Encoding.UTF8.GetBytes(name);
         return Invoke(
-            () => BeginPairingNative(
-                listenBytes,
-                (nuint)listenBytes.Length,
-                advertiseBytes,
-                (nuint)advertiseBytes.Length,
-                nameBytes,
-                (nuint)nameBytes.Length),
-            RappJsonContext.Default.NativeEnvelopeBeginPairingResult);
+            () =>
+                BeginPairingNative(
+                    listenBytes,
+                    (nuint)listenBytes.Length,
+                    advertiseBytes,
+                    (nuint)advertiseBytes.Length,
+                    nameBytes,
+                    (nuint)nameBytes.Length
+                ),
+            RappJsonContext.Default.NativeEnvelopeBeginPairingResult
+        );
     }
 
     /// <summary>Reads the current pairing state for the handle.</summary>
@@ -108,17 +110,25 @@ internal static partial class NativeRappService
     /// </summary>
     internal static void ConfirmPairing(ulong handle, IReadOnlyList<string> granted)
     {
-        byte[] grantedBytes = granted.Count == 0
-            ? []
-            : JsonSerializer.SerializeToUtf8Bytes(granted, RappJsonContext.Default.IReadOnlyListString);
+        byte[] grantedBytes =
+            granted.Count == 0
+                ? []
+                : JsonSerializer.SerializeToUtf8Bytes(
+                    granted,
+                    RappJsonContext.Default.IReadOnlyListString
+                );
         _ = Invoke(
             () => ConfirmPairingNative(handle, grantedBytes, (nuint)grantedBytes.Length),
-            RappJsonContext.Default.NativeEnvelopeAcknowledgement);
+            RappJsonContext.Default.NativeEnvelopeAcknowledgement
+        );
     }
 
     /// <summary>Denies the pairing and drops the offer.</summary>
     internal static void CancelPairing(ulong handle) =>
-        _ = Invoke(() => CancelPairingNative(handle), RappJsonContext.Default.NativeEnvelopeAcknowledgement);
+        _ = Invoke(
+            () => CancelPairingNative(handle),
+            RappJsonContext.Default.NativeEnvelopeAcknowledgement
+        );
 
     /// <summary>Releases the handle and its background resources.</summary>
     internal static void EndPairing(ulong handle) => EndPairingNative(handle);
@@ -132,23 +142,39 @@ internal static partial class NativeRappService
         nint response = operation();
         if (response == nint.Zero)
         {
-            throw new NativeRappException("native_allocation_failed", "The remote-card service did not respond.");
+            throw new NativeRappException(
+                "native_allocation_failed",
+                "The remote-card service did not respond."
+            );
         }
 
         try
         {
-            string json = Marshal.PtrToStringUTF8(response)
-                ?? throw new NativeRappException("native_response_invalid", "The remote-card response was not valid UTF-8.");
-            NativeEnvelope<T> envelope = JsonSerializer.Deserialize(json, envelopeInfo)
-                ?? throw new NativeRappException("native_response_invalid", "The remote-card response was not valid JSON.");
+            string json =
+                Marshal.PtrToStringUTF8(response)
+                ?? throw new NativeRappException(
+                    "native_response_invalid",
+                    "The remote-card response was not valid UTF-8."
+                );
+            NativeEnvelope<T> envelope =
+                JsonSerializer.Deserialize(json, envelopeInfo)
+                ?? throw new NativeRappException(
+                    "native_response_invalid",
+                    "The remote-card response was not valid JSON."
+                );
             if (!envelope.Ok)
             {
                 throw new NativeRappException(
                     envelope.Error?.Code ?? "native_error",
-                    envelope.Error?.Message ?? "The remote-card service failed.");
+                    envelope.Error?.Message ?? "The remote-card service failed."
+                );
             }
 
-            return envelope.Data ?? throw new NativeRappException("native_response_empty", "The remote-card response carried no data.");
+            return envelope.Data
+                ?? throw new NativeRappException(
+                    "native_response_empty",
+                    "The remote-card response carried no data."
+                );
         }
         finally
         {

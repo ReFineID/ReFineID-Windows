@@ -31,7 +31,8 @@ using Microsoft.UI.Xaml.Controls;
 [SuppressMessage(
     "Performance",
     "CA1812:Avoid uninstantiated internal classes",
-    Justification = "Instantiated by the root Frame through XAML type activation.")]
+    Justification = "Instantiated by the root Frame through XAML type activation."
+)]
 internal sealed partial class MainPage : Page
 {
     /// <summary>The TCP port the requester listens on for the phone's dial.</summary>
@@ -79,7 +80,13 @@ internal sealed partial class MainPage : Page
         try
         {
             begun = await Task.Run(() =>
-                NativeRappService.BeginPairing($"0.0.0.0:{ListenPort}", advertise, RequesterName)).ConfigureAwait(true);
+                    NativeRappService.BeginPairing(
+                        $"0.0.0.0:{ListenPort}",
+                        advertise,
+                        RequesterName
+                    )
+                )
+                .ConfigureAwait(true);
         }
         catch (NativeRappException error)
         {
@@ -108,7 +115,8 @@ internal sealed partial class MainPage : Page
         this.SetBusy(true);
         try
         {
-            CardReading reading = await Task.Run(() => NativeRappService.ReadCard(handle)).ConfigureAwait(true);
+            CardReading reading = await Task.Run(() => NativeRappService.ReadCard(handle))
+                .ConfigureAwait(true);
             string holder = string.IsNullOrWhiteSpace(reading.Identity.PersonId)
                 ? reading.Identity.DisplayName
                 : $"{reading.Identity.DisplayName} {reading.Identity.PersonId}";
@@ -168,20 +176,27 @@ internal sealed partial class MainPage : Page
     {
         foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
         {
-            if (adapter.OperationalStatus != OperationalStatus.Up ||
-                adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+            if (
+                adapter.OperationalStatus != OperationalStatus.Up
+                || adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback
+            )
             {
                 continue;
             }
 
-            foreach (UnicastIPAddressInformation address in adapter.GetIPProperties().UnicastAddresses)
+            foreach (
+                UnicastIPAddressInformation address in adapter.GetIPProperties().UnicastAddresses
+            )
             {
-                if (address.Address.AddressFamily == AddressFamily.InterNetwork &&
-                    !IPAddress.IsLoopback(address.Address))
+                if (
+                    address.Address.AddressFamily == AddressFamily.InterNetwork
+                    && !IPAddress.IsLoopback(address.Address)
+                )
                 {
                     return string.Create(
                         CultureInfo.InvariantCulture,
-                        $"{address.Address}:{ListenPort}");
+                        $"{address.Address}:{ListenPort}"
+                    );
                 }
             }
         }
