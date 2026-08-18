@@ -1,7 +1,7 @@
 protocol: RAPP
 document_version: "26.8.17.233"
 supersedes: "26.8.16.85"
-wire_version: "0.1-draft"
+wire_version: "26.8"
 status: external-review
 
 semantics:
