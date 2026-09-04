@@ -2,13 +2,13 @@
 
 Status: External-review draft  
 Intended status: Experimental  
-Document version: 26.8.17.233  
-Supersedes: 26.8.16.85  
-Protocol wire version: 26.8  
-Date: 2026-08-17  
-Change controller: ReFineID project  
-Companion model: [RAPP state machine 26.8.17.233](rapp-state-machine-v26.8.17.233.yaml)  
-Conformance corpus: [RAPP vectors 26.8.17.233](vectors/rapp-v26.8.17.233.json)
+Document version: 26.9.4.181  
+Supersedes: 26.8.17.233  
+Protocol wire version: 26.9  
+Date: 2026-09-04  
+Change controller: RefineID project  
+Companion model: [RAPP state machine 26.9.4.181](rapp-state-machine-v26.9.4.181.yaml)  
+Conformance corpus: [RAPP vectors 26.9.4.181](vectors/rapp-v26.9.4.181.json)
 
 ## Abstract
 
@@ -20,7 +20,7 @@ and an identity card communicating with the phone over NFC. The same protocol
 is intended to support macOS, iOS, Android, Windows, Linux, FreeBSD, local
 networks, and an untrusted Internet relay.
 
-RAPP pairs devices through a manually initiated, high-entropy QR offer. It then
+RAPP pairs devices through a manually initiated 6-digit numeric pairing code. It then
 uses end-to-end mutually authenticated sessions independently of the selected
 network transport. Every credential operation is typed, explicitly authorized
 on the proxy, bound to one session and operation identifier, and executed at
@@ -101,14 +101,14 @@ RAPP is not:
 The **Requester** asks for a typed credential operation. Examples include a
 browser authentication agent, a document-signing application, or an
 administrator requesting a PIN-management operation. The requester is the
-Noise initiator in RAPP 26.8.
+Noise initiator in RAPP 26.9.
 
 ### 3.2 Authorization Proxy
 
 The **Authorization Proxy** presents the operation to the user, obtains any
 required credential locally, communicates with the credential holder, and
 returns only the profile-defined result. A phone is the expected first proxy.
-The proxy is the Noise responder in RAPP 26.8.
+The proxy is the Noise responder in RAPP 26.9.
 
 ### 3.3 Credential Holder
 
@@ -153,9 +153,9 @@ RAPP assumes an adversary may:
 - observe, delay, drop, duplicate, reorder, truncate, or inject network data;
 - control the rendezvous relay and transport discovery infrastructure;
 - cause ordinary network transitions and temporary loss;
-- replay an old QR image, handshake, frame, request, commit, or result;
-- present an attacker-controlled pairing QR to either user;
-- connect to an advertised pairing transport without knowing the QR secret;
+- replay an old pairing code, handshake, frame, request, commit, or result;
+- present an attacker-controlled pairing code to either user;
+- connect to an advertised pairing transport without knowing the pairing secret derived from the code;
 - submit malformed CBOR and unsupported extensions;
 - attempt version, cipher-suite, profile, or transport downgrade;
 - trigger concurrent sessions and duplicate operations;
@@ -167,7 +167,7 @@ RAPP assumes an adversary may:
 RAPP assumes:
 
 - the user controls both device displays during initial pairing;
-- the QR channel is not secretly recorded by an attacker during pairing;
+- the pairing code entry is not secretly observed by an attacker during pairing;
 - each endpoint has a cryptographically secure random-number generator;
 - each endpoint can protect a device-only, non-synchronized pairing key;
 - the authorization proxy UI and credential transport are trusted while used;
@@ -187,7 +187,7 @@ revoking a stored pairing, or learning pairing-payload content.
 ### 4.4 Explicit residual risks
 
 RAPP cannot prevent denial of service, endpoint compromise, misleading context
-provided by an unattested requester, shoulder-surfing of a pairing QR, or
+provided by an unattested requester, shoulder-surfing of a pairing code, or
 traffic analysis by a relay. A relay or on-path attacker can force any number
 of session closures; RAPP bounds the damage to reconnection effort and never
 to pairing loss. A profile MUST distinguish independently verified context
@@ -233,7 +233,7 @@ account, hardware serial number, or globally stable device identifier.
 The wire version is a two-element `[major, minor]` array. A major-version
 difference is incompatible. A minor version may add non-critical fields only.
 Version and capability selection are authenticated as part of the Noise
-handshake transcript. RAPP 26.8 permits no silent downgrade and no 0-RTT
+handshake transcript. RAPP 26.9 permits no silent downgrade and no 0-RTT
 operation data.
 
 ## 7. Wire representation
@@ -331,7 +331,8 @@ The following named limits apply:
 | `MAX_FRAME_PLAINTEXT` | 65,519 bytes per envelope |
 | `MAX_NESTING_DEPTH` | 8 containers |
 | `MAX_TEXT_SIZE` | 4,096 UTF-8 bytes |
-| `MAX_OFFER_SIZE` | 1,024 bytes before QR encoding |
+| `PAIRING_CODE_LENGTH` | 6 decimal digits (formatted in two 3-digit groups) |
+| `MAX_OFFER_SIZE` | 1,024 bytes |
 | `MAX_TRANSPORT_CANDIDATES` | 8 |
 | `MAX_ACTIVE_OPERATIONS` | 1 per proxy |
 | `OFFER_TTL_MAX` | 180,000 ms |
@@ -493,20 +494,27 @@ conservative message limit.
 ### 9.1 Manual initiation
 
 Pairing starts only after an explicit action on the requester. The requester
-creates one offer and displays it as a QR code. Background discovery MUST NOT
-create a pairing or extend an offer's life.
+creates one offer and displays a 6-digit numeric pairing code (formatted as two
+3-digit groups, e.g. `123 456`). Background discovery MUST NOT create a pairing
+or extend an offer's life.
 
-### 9.2 Pairing offer
+### 9.2 Pairing code and offer derivation
 
-The QR encodes deterministic CBOR using a `rapp:` URI carrying base64url data
-without padding, as defined by
+The pairing code is a 6-digit decimal number (`000000`–`999999`) generated randomly
+by the initiating peer and entered manually on the other peer.
+
+The offer identifier and pairing secret are deterministically derived from the code:
+- `pairing_secret` = `SHA-256("refineid-rapp-pairing-secret-v1:" || code)`
+- `offer_id` = `SHA-256("refineid-rapp-offer-id-v1:" || code)[0..16]`
+
+When serialized for programmatic or URI transport, the offer encodes deterministic CBOR using a `rapp:` URI carrying base64url data without padding, as defined by
 [RFC 4648](https://www.rfc-editor.org/rfc/rfc4648.html). Its logical content is:
 
 ```cddl
 pairing-offer = {
   "scheme": "rapp",
   "version": [uint, uint],
-  "offer_id": bstr .size 32,
+  "offer_id": bstr .size 16,
   "pairing_secret": bstr .size 32,
   "suites": [1* tstr],
   "profiles": [1* tstr],
@@ -521,8 +529,7 @@ transport-candidate = {
 }
 ```
 
-The encoded offer MUST NOT exceed `MAX_OFFER_SIZE`, which keeps the QR code
-within comfortable scanning density. `offer_ttl_ms` MUST NOT exceed
+The encoded offer MUST NOT exceed `MAX_OFFER_SIZE`. `offer_ttl_ms` MUST NOT exceed
 `OFFER_TTL_MAX`; each side independently clamps it to local policy, the
 requester enforcing expiry with a monotonic clock and the proxy treating the
 value as an upper-bound hint without trusting the sender's wall clock.
@@ -533,17 +540,17 @@ its use as the handshake pre-shared key ends.
 
 ### 9.3 Pairing exchange
 
-1. The requester creates an offer, enters `offer_active`, and displays the QR.
-2. The proxy scans the QR and validates its structure, size, supported
+1. The requester creates an offer, enters `offer_active`, and displays the 6-digit pairing code.
+2. The proxy user inputs the 6-digit code, and the proxy validates its structure, supported
    version, suite, profile intersection, and local transport policy.
 3. The proxy selects exactly one offered transport candidate and connects.
    Logical Noise roles remain requester-initiator and proxy-responder
    regardless of which side opened the underlying socket.
-4. The peers run the pairing Noise handshake with `pairing_secret` as the
+4. The peers run the pairing Noise handshake with `pairing_secret` (derived from the code) as the
    `psk3` value, the prologue of Section 8.3, and empty handshake payloads.
 5. When the handshake completes, both peers derive the channel identifiers of
    Section 8.5, and both destroy the pairing secret. The requester hides the
-   QR and stops accepting further candidates for this offer.
+   pairing code and stops accepting further candidates for this offer.
 6. Both peers exchange `pairing.hello`: the negotiated-parameter echo, a
    display name, a platform description, and the requester's requested
    profiles. Names are labels, not identities.
@@ -603,11 +610,11 @@ the candidate keys, invalidates the offer, and returns both peers to
 `unpaired`. A confirmation phase that exceeds local policy time aborts the
 same way.
 
-### 9.5 Pairing confirmation and QR observation
+### 9.5 Pairing confirmation and out-of-band verification
 
-The 256-bit QR secret, not a short decimal code, authenticates the out-of-band
+The pairing secret derived from the 6-digit code authenticates the out-of-band
 exchange. Both endpoints still require explicit confirmation to prevent an
-unexpected scanner from silently becoming trusted. A presentation profile MAY
+unexpected peer from silently becoming trusted. A presentation profile MAY
 derive an accessible comparison representation from the final Noise handshake
 hash. Such a representation is an additional human check and MUST NOT reduce
 the cryptographic entropy used by the protocol.
@@ -615,7 +622,7 @@ the cryptographic entropy used by the protocol.
 ## 10. Session establishment
 
 A paired requester opens a new transport only after explicit user or
-application action. RAPP 26.8 does not automatically reconnect a closed
+application action. RAPP 26.9 does not automatically reconnect a closed
 session.
 
 1. The requester selects one mutually stored transport profile and initiates
@@ -659,7 +666,7 @@ session.
    protocol violation.
 
 No application operation is permitted during connection or authentication.
-RAPP 26.8 has no 0-RTT data, session resumption, connection migration, or
+RAPP 26.9 has no 0-RTT data, session resumption, connection migration, or
 mid-session transport fallback. A new transport requires a new session and
 fresh handshake.
 
@@ -933,11 +940,11 @@ report, production log, or operation journal.
 
 | Profile | Purpose | Consequential command |
 | --- | --- | --- |
-| `fi.eid.card-status.v1` | inspect supported card and retry state | none |
-| `fi.eid.authentication.v1` | browser or application authentication | PIN 1 verify and private-key operation |
-| `fi.eid.document-signing.v1` | sign a document digest | PIN 2 verify and private-key operation |
-| `fi.eid.activation.v1` | activate factory PIN 1 or PIN 2 | one PIN change per operation |
-| `fi.eid.pin-management.v1` | change or reset one PIN | one PIN change or PUK reset |
+| `fi.refineid.card-status.v1` | inspect supported card and retry state | none |
+| `fi.refineid.authentication.v1` | browser or application authentication | PIN 1 verify and private-key operation |
+| `fi.refineid.document-signing.v1` | sign a document digest | PIN 2 verify and private-key operation |
+| `fi.refineid.activation.v1` | activate factory PIN 1 or PIN 2 | one PIN change per operation |
+| `fi.refineid.pin-management.v1` | change or reset one PIN | one PIN change or PUK reset |
 
 The card-status, authentication, and document-signing actions are defined
 below. Activation and PIN-management payloads remain reserved design space and
@@ -949,22 +956,22 @@ The initial action registry is closed:
 
 | Action | Owning profile | Consequential command |
 | --- | --- | --- |
-| `inspect_card` | `fi.eid.card-status.v1` | none |
-| `read_identity` | `fi.eid.card-status.v1` | none |
+| `inspect_card` | `fi.refineid.card-status.v1` | none |
+| `read_identity` | `fi.refineid.card-status.v1` | none |
 | `read_certificate` | key-matching profile, below | none |
-| `browser_authenticate` | `fi.eid.authentication.v1` | PIN 1 verify and private-key operation |
-| `sign_document` | `fi.eid.document-signing.v1` | PIN 2 verify and private-key operation |
+| `browser_authenticate` | `fi.refineid.authentication.v1` | PIN 1 verify and private-key operation |
+| `sign_document` | `fi.refineid.document-signing.v1` | PIN 2 verify and private-key operation |
 
 `inspect_card` and `read_identity` carry empty context and payload maps.
 `read_certificate` carries exactly one payload field, `kind`, whose registered
 values are `authentication` and `signature`. The action is owned by the
 profile whose key the certificate serves: reading the authentication
-certificate requires the `fi.eid.authentication.v1` grant, and reading the
-signature certificate requires the `fi.eid.document-signing.v1` grant, so a
+certificate requires the `fi.refineid.authentication.v1` grant, and reading the
+signature certificate requires the `fi.refineid.document-signing.v1` grant, so a
 requester never learns a certificate whose key it could not ask to use. All
 three reads are safe reads and omit prepare and commit (Section 12.2).
 
-`browser_authenticate` under `fi.eid.authentication.v1` carries:
+`browser_authenticate` under `fi.refineid.authentication.v1` carries:
 
 | Map | Field | Type | Meaning |
 | --- | --- | --- | --- |
@@ -973,7 +980,7 @@ three reads are safe reads and omit prepare and commit (Section 12.2).
 | payload | `algorithm` | registered text | exact signature algorithm |
 | payload | `digest` | bytes | already-hashed challenge of the registered length |
 
-`sign_document` under `fi.eid.document-signing.v1` has the same payload fields
+`sign_document` under `fi.refineid.document-signing.v1` has the same payload fields
 and carries bounded non-empty `document_name` in its context map instead of
 `origin`. Documents and unhashed browser input MUST NOT cross RAPP.
 
@@ -1038,33 +1045,28 @@ typed boundaries.
 
 ### 13.4 Credential rejection terminates RAPP
 
-If the credential holder rejects the CAN, PIN 1, or PIN 2 — during safe
-prerequisite reads, secure-channel establishment, or the consequential
-command — the proxy MUST:
+If the credential holder reports that PIN 1, PIN 2, or the CAN is bad or
+rejected — during safe prerequisite reads, secure-channel establishment, or
+the consequential command — it is an indication of a critical security violation
+or corrupted credential state. The authorization proxy device MUST:
 
 1. make no further card transmission;
-2. mark the operation `credential_rejected`;
-3. destroy every credential value and command buffer involved in the operation;
-4. remove any cached value for the rejected credential;
-5. for invalid CAN, remove stored CAN and card-derived identity state;
-6. send only the profile's bounded `credential_rejected` result when the
-   authenticated channel is still usable;
-7. durably destroy the pairing keys and write a pairing tombstone after that
-   bounded result has been sealed; and
+2. mark the active operation `credential_rejected`;
+3. immediately drop and permanently close all active RAPP connections and sessions;
+4. durably destroy all pairing keys and write tombstones for all pairings on the
+   device, permanently preventing reconnect until explicitly re-paired;
+5. purge all stored local identities, credentials, cached PINs, CANs, and
+   card-derived state;
+6. reset the authorization proxy software on the device to an initial "factory reset" state;
+7. send only the profile's bounded `credential_rejected` result to the active
+   peer if the authenticated channel is still usable prior to closing; and
 8. move the RAPP session immediately to `closing`.
 
 The authenticated requester that receives `credential_rejected` MUST also
 durably destroy its pairing keys and write a tombstone before reporting the
-terminal result. Recovery requires a new manual pairing ceremony; there is no
-automatic reconnect or two-incident grace policy.
-
-PIN 2 is never cached. A PIN 2 rejection still clears the entry and all other
-credential fields in the active flow. A PIN 1 rejection destroys any PIN 1
-convenience entry. The authorization proxy MAY show the locally known retry
-count; the requester receives only information allowed by the profile.
-
-Card rejection is not, by itself, evidence that the paired network peer is
-malicious. The device pairing therefore remains `paired_disconnected`.
+terminal result. Recovery requires a completely new manual pairing ceremony
+once the device has been re-initialized and re-paired; there is no automatic
+reconnect, grace policy, or retry counter recovery.
 
 ### 13.5 Activation and partial completion
 
@@ -1098,7 +1100,7 @@ specification revision rather than an implementation guess.
 The machines describe instances, not singletons:
 
 - a **pairing instance** exists per stored or in-progress peer relationship;
-  `unpaired` is the absence of an instance, and a new offer or scan creates a
+  `unpaired` is the absence of an instance, and a new offer or pairing code entry creates a
   new instance with fresh keys;
 - a **session instance** exists per connection attempt; `absent` means no
   live instance for the pairing, and a new instance may be created whenever
@@ -1126,7 +1128,7 @@ journal.
 | State | Meaning |
 | --- | --- |
 | `unpaired` | no peer keys exist |
-| `offer_active` | one manual QR offer is live (requester only) |
+| `offer_active` | one manual pairing offer is live (requester only) |
 | `handshaking` | pairing Noise handshake is in progress |
 | `confirming` | authenticated exchange awaits both approvals |
 | `paired_disconnected` | durable pairing exists; no healthy session |
@@ -1134,7 +1136,7 @@ journal.
 | `revoked` | the pairing was deliberately terminated, locally or by authenticated peer notice |
 
 `revoked` is a fail-stop state. Existing keys cannot be reactivated. The user
-may forget the record and perform a completely new QR pairing with new keys.
+may forget the record and perform a completely new pairing with a new code and keys.
 Unauthenticated traffic, failed handshakes, and frames that fail authenticated
 decryption can never revoke a stored pairing.
 
@@ -1215,7 +1217,7 @@ machine-readable model and its generated tests:
 A successfully decrypted protocol violation proves that the peer holding the
 pair keys sent nonconforming traffic. The first such violation closes the
 session, moves the pairing immediately to `revoked`, destroys the pair keys,
-and requires a completely new manual QR pairing. RAPP 26.8 has no violation
+and requires a completely new manual pairing. RAPP 26.9 has no violation
 counter, grace event, automatic recovery, or restoration of revoked keys.
 
 Entering `revoked` sends, while an authenticated channel still exists, one
@@ -1272,7 +1274,7 @@ error-body = {
 }
 ```
 
-Registered `error` names in RAPP 26.8: `busy`, `unknown_operation`.
+Registered `error` names in RAPP 26.9: `busy`, `unknown_operation`.
 
 | Condition | Wire carrier | Session effect | Pairing effect | Credential attempts |
 | --- | --- | --- | --- | --- |
@@ -1416,7 +1418,7 @@ The relay MUST:
 - handle only encrypted frames and bounded routing metadata;
 - prevent one peer from enumerating other peers;
 - apply size, rate, lifetime, and connection limits before buffering;
-- avoid durable store-and-forward in RAPP 26.8;
+- avoid durable store-and-forward in RAPP 26.9;
 - ensure push notifications contain only an opaque wake hint;
 - delete queued ciphertext when a session closes or expires; and
 - document retained metadata and deletion periods.
@@ -1568,7 +1570,7 @@ Conformance evidence includes:
 - production-artifact inspection proving unsafe diagnostics are absent.
 
 The machine-readable corpus at
-`vectors/rapp-v26.8.17.233.json` fixes the deterministic CBOR,
+`vectors/rapp-v26.9.4.181.json` fixes the deterministic CBOR,
 envelope-rejection, sequence, downgrade, grant, hash, and mandatory Noise
 XXpsk3/KK known-answer vectors for this document version. Fields prefixed
 `test_only_` are public deterministic test material and MUST NOT be used as
@@ -1605,10 +1607,10 @@ Review is specifically requested on:
 
 1. whether Noise revision 34 and the proposed `XXpsk3`/`KK` patterns are the
    right stable basis, or whether a standardized alternative is preferable;
-2. whether the QR possession assumption and two-sided confirmation adequately
-   address QR observation and pairing races;
+2. whether the pairing code entry assumption and two-sided confirmation adequately
+   address observation and pairing races;
 3. the correct accessible human-verification representation, if one is needed
-   in addition to the high-entropy QR;
+   in addition to the 6-digit code;
 4. whether pair-specific static X25519 keys provide the desired privacy and key
    lifecycle across all target platforms;
 5. operation-journal durability, and whether Section 12.6 status
@@ -1625,6 +1627,31 @@ Review is specifically requested on:
 12. handling of local implementation faults without enabling peer-triggered
     denial of service; and
 13. completeness of the composite state machine and formal verification plan.
+
+### 24.1 Review checklist
+
+An external reviewer should be able to answer:
+
+- What exact fact authenticates each peer during pairing and later sessions?
+- Which fields are bound to the cryptographic transcript, and can both peers
+  possess every bound value before the handshake?
+- Does any handshake message carry a payload readable before the pre-shared
+  key is mixed?
+- What can a malicious relay learn, modify, or permanently destroy?
+- Can network garbage, a corrupted frame, or a failed handshake force
+  permanent loss of a valid pairing or consume a live offer?
+- When can a credential or mutating card command physically occur?
+- How is a duplicate commit prevented after process failure?
+- Which failures close only a session and which destroy a pairing, and how
+  does the innocent peer learn of destruction?
+- What happens if NFC fails immediately before or after card transmission?
+- Does any path automatically retry an ambiguous operation, and how is an
+  ambiguous record later resolved without card replay?
+- What information reaches the requester, proxy, relay, and relying party?
+- Are all states visible and accessible without relying only on color or
+  motion?
+- Can an implementation accept an input that neither matches a modeled
+  transition nor an unexpected-input policy class?
 
 ## 25. References
 
@@ -1655,104 +1682,4 @@ Review is specifically requested on:
   [Doc 9303: Machine Readable Travel Documents, Part 11 — Security Mechanisms
   for MRTDs](https://www.icao.int/publications/pages/publication.aspx?docnum=9303).
 
-## Appendix A. Review checklist
 
-An external reviewer should be able to answer:
-
-- What exact fact authenticates each peer during pairing and later sessions?
-- Which fields are bound to the cryptographic transcript, and can both peers
-  possess every bound value before the handshake?
-- Does any handshake message carry a payload readable before the pre-shared
-  key is mixed?
-- What can a malicious relay learn, modify, or permanently destroy?
-- Can network garbage, a corrupted frame, or a failed handshake force
-  permanent loss of a valid pairing or consume a live offer?
-- When can a credential or mutating card command physically occur?
-- How is a duplicate commit prevented after process failure?
-- Which failures close only a session and which destroy a pairing, and how
-  does the innocent peer learn of destruction?
-- What happens if NFC fails immediately before or after card transmission?
-- Does any path automatically retry an ambiguous operation, and how is an
-  ambiguous record later resolved without card replay?
-- What information reaches the requester, proxy, relay, and relying party?
-- Are all states visible and accessible without relying only on color or
-  motion?
-- Can an implementation accept an input that neither matches a modeled
-  transition nor an unexpected-input policy class?
-
-## Appendix B. Changes from 26.8.16.84
-
-Review of draft 26.8.16.84 found that it could not be implemented
-interoperably and that several routine events escalated to pairing
-destruction. This revision:
-
-- rebuilt transcript binding on values both peers possess, defined the
-  `offer_hash` preimage (bearer secret excluded), and derived `pair_id` and
-  `session_id` from the Noise handshake hash instead of transmitting them;
-- required empty Noise handshake payloads, moving names and grants behind the
-  completed handshake, because `psk3` authenticates nothing before message 3;
-- stopped burning a live offer on failed or unauthenticated handshakes;
-- added body schemas for every message type, pairing messages
-  (`pairing.hello`, `pairing.confirm`, `pairing.abort`), grant agreement with
-  `grants_hash`, and the exact `request_hash` preimage;
-- reclassified established-channel decryption failure as a session-only
-  integrity failure, removing the relay's ability to destroy a pairing, while
-  retaining immediate revocation for authenticated protocol violations;
-- made revocation visible to the other peer through authenticated close
-  reasons, with defined behavior when no channel exists;
-- added the missing routine transitions: peer close, transport failure and
-  EOF in every live state, pre-commit cancellation and expiry, card removal
-  before transmission, and prerequisite-phase credential rejection including
-  profiles with no consequential command;
-- keyed operation reclassification on session closure instead of any
-  departure from healthy, so a missed heartbeat no longer voids a committed
-  operation, and gave credential rejection precedence over ambiguity;
-- replaced wildcard transitions with role-annotated per-instance machines, an
-  explicit unexpected-input policy, and defined instance lifecycles, removing
-  the undefined reset and acknowledgment events;
-- added status reconciliation (`operation.status`) so an ambiguous record can
-  be resolved from the proxy journal without card replay;
-- corrected FINEID retry-counter facts: only a failed PUK reset consumes a
-  PUK attempt, and the CAN has no try counter, so counter rules now apply
-  only to counter-bearing credentials;
-- extended forget and revocation to destroy offer, candidate,
-  and session state coupled to the pairing; and
-- aligned frame limits with the Noise message ceiling, required pong
-  challenge verification, bounded offer lifetime and size, and defined the
-  storage protection of retained results.
-
-## Appendix C. Changes from 26.8.16.85
-
-Revision 26.8.17.233 restores the durable pairing design. The 26.8.17.213 single-handshake collapse -- an ephemeral, liveness-bound experiment in which a pairing lived only for the life of one connection -- was reverted, returning to durable pairing with the Noise_KK reconnect handshake so a requester, including a credential-store extension running in its own process, reconnects to a stored pairing per use without a running app. The wire version is `[26, 8]`, raised from the pre-release `[0, 1]` and hashed into the handshake prologue, so the conformance corpus is regenerated under it; the pairing design is otherwise the prior durable revision.
-
-Draft 26.8.16.85 continued to evolve after its version was stamped, so the
-label briefly named more than one document. This revision collects that
-drift under a fresh version and adds the first cross-platform transport
-profile. Relative to the originally stamped 26.8.16.85 text:
-
-- replaced per-pairing violation strikes and the quarantine state with
-  immediate revocation: the first authenticated protocol violation revokes
-  the pairing on both peers, removing `VIOLATION_STRIKE_LIMIT`, the
-  `quarantined` state, and the `pairing_quarantined` close reason;
-- extended credential rejection to durably revoke the pairing on both peers
-  with a written tombstone, replacing the earlier user-intent admission
-  record;
-- defined the closed action registry: `inspect_card`, `read_identity`,
-  `read_certificate`, `browser_authenticate`, and `sign_document`, with
-  certificate reads owned by the profile whose key the certificate serves;
-- defined the `browser_authenticate` and `sign_document` payload schemas and
-  the closed `key_profile` and `algorithm` registries, with digest lengths,
-  compatibility rules, and the proxy-side certificate match requirement;
-- registered `fi.refineid.stream.v1` (Section 16.1): a length-prefixed
-  stream profile in which the requester listens and the proxy dials, for
-  requester platforms without Apple-native connectivity;
-- generalized session establishment so that underlying connection direction
-  is a transport-profile property while the requester remains the handshake
-  initiator on every profile, and required a transport whose accepting
-  endpoint is the requester to indicate the pairing before the handshake;
-- added the derived `rendezvous_token` (Section 8.5), giving transports a
-  plaintext-safe pair-specific rendezvous value distinct from `pair_id`;
-- referenced the machine-readable conformance corpus from the conformance
-  section and carried its vectors forward under this document version; and
-- corrected the abstract, which still described repeated-violation pairing
-  destruction, to the single-violation rule.

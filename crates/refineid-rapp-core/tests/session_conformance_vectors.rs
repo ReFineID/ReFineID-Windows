@@ -22,7 +22,7 @@ use corpus_util::{CORPUS_JSON, fixed};
 /// Vectors in the `sequence_guard` section.
 const SEQUENCE_GUARD_COUNT: usize = 6;
 /// Vectors in the `wire_version` section.
-const WIRE_VERSION_COUNT: usize = 4;
+const WIRE_VERSION_COUNT: usize = 5;
 /// Vectors in the `grant_enforcement` section.
 const GRANT_ENFORCEMENT_COUNT: usize = 3;
 

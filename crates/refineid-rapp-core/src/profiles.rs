@@ -6,15 +6,15 @@
 //! actions culminate in a consequential credential command.
 
 /// Inspect supported card and retry state. No consequential command.
-pub const PROFILE_CARD_STATUS: &str = "fi.eid.card-status.v1";
+pub const PROFILE_CARD_STATUS: &str = "fi.refineid.card-status.v1";
 /// Browser or application authentication: PIN 1 verify and key operation.
-pub const PROFILE_AUTHENTICATION: &str = "fi.eid.authentication.v1";
+pub const PROFILE_AUTHENTICATION: &str = "fi.refineid.authentication.v1";
 /// Sign a document digest: PIN 2 verify and key operation.
-pub const PROFILE_DOCUMENT_SIGNING: &str = "fi.eid.document-signing.v1";
+pub const PROFILE_DOCUMENT_SIGNING: &str = "fi.refineid.document-signing.v1";
 /// Activate factory PIN 1 or PIN 2: one PIN change per operation.
-pub const PROFILE_ACTIVATION: &str = "fi.eid.activation.v1";
+pub const PROFILE_ACTIVATION: &str = "fi.refineid.activation.v1";
 /// Change or reset one PIN: one PIN change or PUK reset.
-pub const PROFILE_PIN_MANAGEMENT: &str = "fi.eid.pin-management.v1";
+pub const PROFILE_PIN_MANAGEMENT: &str = "fi.refineid.pin-management.v1";
 
 /// Whether a registered profile defines a consequential credential command.
 ///
